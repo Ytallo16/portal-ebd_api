@@ -4,21 +4,25 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from access_control.constants import ADMIN_ROLES, SECRETARY_ROLES
 from attendance.models import AttendanceSheet
+from classrooms.models import ClassGroup
+from core.scoping import get_user_role_names
 from core.permissions import module_permission
-from core.tenant import get_user_organization
+from core.viewmixins import OrganizationScopedViewMixin
 
 from .models import Lesson, Trimester
 from .serializers import LessonSerializer, TrimesterSerializer
-from .services import can_edit_lesson
+from .services import can_edit_lesson, can_manage_trimesters
 
 
-class TrimesterViewSet(viewsets.ModelViewSet):
+class TrimesterViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
     serializer_class = TrimesterSerializer
     search_fields = ['titulo']
+    use_operational_organization = True
 
     def get_queryset(self):
-        org = get_user_organization(self.request)
+        org = self.get_active_organization()
         queryset = Trimester.objects.filter(organization=org, is_active=True).order_by('-ano', '-numero')
 
         ano = self.request.query_params.get('ano')
@@ -35,10 +39,19 @@ class TrimesterViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save(organization=get_user_organization(self.request), created_by=self.request.user)
+        if not can_manage_trimesters(self.request.user):
+            raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
+        serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
 
     def perform_update(self, serializer):
+        if not can_manage_trimesters(self.request.user):
+            raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
         serializer.save(updated_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        if not can_manage_trimesters(request.user):
+            raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
+        return super().destroy(request, *args, **kwargs)
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -52,12 +65,13 @@ class TrimesterViewSet(viewsets.ModelViewSet):
         return [perm() for perm in perms]
 
 
-class LessonViewSet(viewsets.ModelViewSet):
+class LessonViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
     serializer_class = LessonSerializer
     search_fields = ['tema', 'revista']
+    use_operational_organization = True
 
     def get_queryset(self):
-        org = get_user_organization(self.request)
+        org = self.get_active_organization()
         queryset = Lesson.objects.filter(organization=org, is_active=True).order_by('-data', 'numero')
 
         trimestre = self.request.query_params.get('trimestre')
@@ -71,10 +85,14 @@ class LessonViewSet(viewsets.ModelViewSet):
         if status_filter:
             queryset = queryset.filter(status=status_filter.upper())
 
+        class_ids = self.get_teaching_class_filter(org)
+        if class_ids is not None:
+            queryset = queryset.filter(attendance_sheets__class_group_id__in=class_ids).distinct()
+
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save(organization=get_user_organization(self.request), created_by=self.request.user)
+        serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
 
     def perform_update(self, serializer):
         lesson = self.get_object()
@@ -99,9 +117,31 @@ class LessonViewSet(viewsets.ModelViewSet):
         if lesson.status == 'FINALIZADA':
             return Response({'detail': 'Lição já finalizada.'}, status=status.HTTP_200_OK)
 
-        has_sheet = AttendanceSheet.objects.filter(lesson=lesson).exists()
-        if not has_sheet:
-            raise ValidationError('Não é possível finalizar sem ao menos uma chamada por turma.')
+        role_names = get_user_role_names(request.user)
+        if not request.user.is_superuser and not role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
+            raise PermissionDenied('Apenas secretários podem finalizar a lição.')
+
+        active_classes = ClassGroup.objects.filter(
+            organization=lesson.organization,
+            ativa=True,
+            is_active=True,
+        )
+        pending = []
+        for class_group in active_classes:
+            sheet = AttendanceSheet.objects.filter(
+                lesson=lesson,
+                class_group=class_group,
+            ).first()
+            if not sheet:
+                pending.append(class_group.nome)
+
+        if pending:
+            raise ValidationError(
+                {
+                    'detail': 'Registre a EBD de todas as turmas ativas antes de encerrar a lição.',
+                    'turmas_pendentes': pending,
+                }
+            )
 
         lesson.status = 'FINALIZADA'
         lesson.updated_by = request.user

@@ -1,19 +1,31 @@
 from datetime import date
+
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from access_control.models import ModulePermission, Role, RolePermission, UserRole
 from accounts.models import User
 from lessons.models import Lesson
+from organizations.constants import FORMATO_CAMPO, TIPO_CAMPO, TIPO_IGREJA
 from organizations.models import Organization, OrganizationMembership
 
 
 class ApiBasicsTests(APITestCase):
     def setUp(self):
+        self.campo = Organization.objects.create(
+            nome='Campo Teste',
+            sigla='CT',
+            tipo=TIPO_CAMPO,
+            formato=FORMATO_CAMPO,
+            cidade='Teresina',
+            uf='PI',
+            status='ATIVA',
+        )
         self.org = Organization.objects.create(
             nome='Org Teste',
             sigla='OT',
-            tipo='SEDE',
+            tipo=TIPO_IGREJA,
+            parent=self.campo,
             cidade='Teresina',
             uf='PI',
             status='ATIVA',
@@ -41,6 +53,7 @@ class ApiBasicsTests(APITestCase):
         response = self.client.get('/api/v1/me')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['email'], 'admin@test.com')
+        self.assertIn('organizacoes_disponiveis', response.data)
 
     def test_lessons_list_scoped_by_organization(self):
         Lesson.objects.create(
@@ -52,8 +65,11 @@ class ApiBasicsTests(APITestCase):
             trimestre=1,
             ano=2026,
         )
+        other_campo = Organization.objects.create(
+            nome='Outro Campo', sigla='OC', tipo=TIPO_CAMPO, formato=FORMATO_CAMPO, cidade='Teresina', uf='PI', status='ATIVA'
+        )
         other_org = Organization.objects.create(
-            nome='Outra Org', sigla='OO', tipo='FILIAL', cidade='Teresina', uf='PI', status='ATIVA'
+            nome='Outra Org', sigla='OO', tipo=TIPO_IGREJA, parent=other_campo, cidade='Teresina', uf='PI', status='ATIVA'
         )
         Lesson.objects.create(
             organization=other_org,

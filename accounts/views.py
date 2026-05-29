@@ -4,11 +4,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import module_permission
+from core.scoping import get_org_descendant_ids, is_campo_organization
 from core.tenant import get_user_organization
-from organizations.models import OrganizationMembership
+from organizations.models import Organization, OrganizationMembership
 
 from .models import User
-from .serializers import MeSerializer, UserCreateSerializer, UserSerializer
+from .serializers import MeSerializer, UserContextUpdateSerializer, UserCreateSerializer, UserSerializer
 
 
 class UserViewSet(
@@ -22,7 +23,11 @@ class UserViewSet(
 
     def get_queryset(self):
         org = get_user_organization(self.request)
-        user_ids = OrganizationMembership.objects.filter(organization=org, ativo=True).values_list('user_id', flat=True)
+        org_ids = get_org_descendant_ids(org) if is_campo_organization(org) else [org.id]
+        user_ids = OrganizationMembership.objects.filter(
+            organization_id__in=org_ids,
+            ativo=True,
+        ).values_list('user_id', flat=True)
         return User.objects.filter(id__in=user_ids).order_by('nome')
 
     def get_serializer_class(self):
@@ -59,7 +64,18 @@ class UserViewSet(
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def me(request):
-    return Response(MeSerializer(request.user).data)
+    return Response(MeSerializer(request.user, context={'request': request}).data)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_context(request):
+    serializer = UserContextUpdateSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    organization = Organization.objects.get(id=serializer.validated_data['organization_id'])
+    request.user.active_organization = organization
+    request.user.save(update_fields=['active_organization'])
+    return Response(MeSerializer(request.user, context={'request': request}).data)
 
 
 @api_view(['POST'])

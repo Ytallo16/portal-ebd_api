@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import module_permission
-from core.tenant import get_user_organization
+from core.viewmixins import OrganizationScopedViewMixin
 from lessons.models import Lesson
 from lessons.serializers import LessonSerializer
 
@@ -13,20 +13,25 @@ from .models import ClassGroup, ClassTeacher
 from .serializers import ClassGroupSerializer
 
 
-class ClassGroupViewSet(viewsets.ModelViewSet):
+class ClassGroupViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
     serializer_class = ClassGroupSerializer
     search_fields = ['nome', 'faixa_etaria']
+    use_operational_organization = True
 
     def get_queryset(self):
-        organization = get_user_organization(self.request)
-        return (
+        organization = self.get_active_organization()
+        queryset = (
             ClassGroup.objects.filter(organization=organization, is_active=True)
             .annotate(total_alunos=Count('students', distinct=True))
             .order_by('nome')
         )
+        class_ids = self.get_teaching_class_filter(organization)
+        if class_ids is not None:
+            queryset = queryset.filter(id__in=class_ids)
+        return queryset
 
     def perform_create(self, serializer):
-        serializer.save(organization=get_user_organization(self.request), created_by=self.request.user)
+        serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
@@ -58,9 +63,16 @@ class ClassGroupViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-class ClassTeacherViewSet(viewsets.ModelViewSet):
-    queryset = ClassTeacher.objects.select_related('class_group', 'user')
-    permission_classes = [IsAuthenticated]
+class ClassTeacherViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, module_permission('turmas', 'editar')]
+    use_operational_organization = True
+
+    def get_queryset(self):
+        org = self.get_active_organization()
+        return ClassTeacher.objects.filter(
+            class_group__organization=org,
+            class_group__is_active=True,
+        ).select_related('class_group', 'user')
 
     def get_serializer_class(self):
         from .serializers import ClassTeacherSerializer

@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import Student, StudentAddress, StudentGuardian
+from .services import turma_exige_responsavel
 
 
 class StudentGuardianSerializer(serializers.ModelSerializer):
@@ -39,6 +40,29 @@ class StudentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['organization']
 
+    def _turma_exige_responsavel(self, instance):
+        turma = instance.class_group
+        if not turma:
+            return False
+        return turma_exige_responsavel(turma.faixa_etaria, turma.nome)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._turma_exige_responsavel(instance):
+            data['responsaveis'] = []
+        return data
+
+    def _sync_responsaveis(self, student, responsaveis_data):
+        student.responsaveis.all().delete()
+        if not student.class_group or not turma_exige_responsavel(
+            student.class_group.faixa_etaria,
+            student.class_group.nome,
+        ):
+            return
+
+        for responsavel in responsaveis_data:
+            StudentGuardian.objects.create(student=student, **responsavel)
+
     def create(self, validated_data):
         endereco_data = validated_data.pop('endereco', None)
         responsaveis_data = validated_data.pop('responsaveis', [])
@@ -47,8 +71,8 @@ class StudentSerializer(serializers.ModelSerializer):
         if endereco_data:
             StudentAddress.objects.create(student=student, **endereco_data)
 
-        for responsavel in responsaveis_data:
-            StudentGuardian.objects.create(student=student, **responsavel)
+        if responsaveis_data and student.class_group:
+            self._sync_responsaveis(student, responsaveis_data)
 
         return student
 
@@ -63,9 +87,9 @@ class StudentSerializer(serializers.ModelSerializer):
         if endereco_data is not None:
             StudentAddress.objects.update_or_create(student=instance, defaults=endereco_data)
 
-        if responsaveis_data is not None:
+        if not self._turma_exige_responsavel(instance):
             instance.responsaveis.all().delete()
-            for responsavel in responsaveis_data:
-                StudentGuardian.objects.create(student=instance, **responsavel)
+        elif responsaveis_data is not None:
+            self._sync_responsaveis(instance, responsaveis_data)
 
         return instance

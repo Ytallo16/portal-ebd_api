@@ -1,15 +1,16 @@
-from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from core.tenant import get_user_organization
+from core.permissions import module_permission
+from core.viewmixins import OrganizationScopedViewMixin
 from lessons.models import Lesson
-from lessons.services import can_edit_lesson
+from lessons.services import can_edit_attendance_sheet
 
 from .models import AttendanceRecord, AttendanceSheet
+from .services import sync_offering_from_attendance_sheet
 from .serializers import (
     AttendanceBulkUpsertSerializer,
     AttendanceRecordSerializer,
@@ -17,28 +18,64 @@ from .serializers import (
 )
 
 
-class AttendanceSheetViewSet(viewsets.ModelViewSet):
+class AttendanceSheetViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
     serializer_class = AttendanceSheetSerializer
-    permission_classes = [IsAuthenticated]
+    use_operational_organization = True
 
     def get_queryset(self):
-        org = get_user_organization(self.request)
-        return AttendanceSheet.objects.filter(
+        org = self.get_active_organization()
+        queryset = AttendanceSheet.objects.filter(
             lesson__organization=org
         ).select_related('lesson', 'class_group', 'professor')
+        class_ids = self.get_teaching_class_filter(org)
+        if class_ids is not None:
+            queryset = queryset.filter(class_group_id__in=class_ids)
+        return queryset
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            perms = [IsAuthenticated, module_permission('frequencia', 'visualizar')]
+        elif self.action == 'create':
+            perms = [IsAuthenticated, module_permission('frequencia', 'criar')]
+        elif self.action in ['partial_update', 'update', 'records']:
+            perms = [IsAuthenticated, module_permission('frequencia', 'editar')]
+        else:
+            perms = [IsAuthenticated, module_permission('frequencia', 'excluir')]
+        return [perm() for perm in perms]
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        lesson = serializer.validated_data['lesson']
+        class_group = serializer.validated_data['class_group']
+        preview = AttendanceSheet(lesson=lesson, class_group=class_group)
+        if not can_edit_attendance_sheet(self.request.user, preview):
+            raise PermissionDenied(
+                'Você só pode registrar a EBD nas turmas em que leciona.'
+            )
+        sheet = serializer.save(created_by=self.request.user)
+        sheet = AttendanceSheet.objects.select_related(
+            'lesson', 'class_group__organization'
+        ).get(pk=sheet.pk)
+        sync_offering_from_attendance_sheet(sheet)
 
     def perform_update(self, serializer):
-        serializer.save(updated_by=self.request.user)
+        sheet = self.get_object()
+        if not can_edit_attendance_sheet(self.request.user, sheet):
+            raise PermissionDenied('Você não pode editar este registro da EBD.')
+        sheet = serializer.save(updated_by=self.request.user)
+        if sheet.finalized_at is not None:
+            sheet.finalized_at = None
+            sheet.save(update_fields=['finalized_at', 'updated_at'])
+        sheet = AttendanceSheet.objects.select_related(
+            'lesson', 'class_group__organization'
+        ).get(pk=sheet.pk)
+        sync_offering_from_attendance_sheet(sheet)
 
     @action(detail=True, methods=['POST'], url_path='records')
     def records(self, request, pk=None):
         sheet = self.get_object()
 
-        if not can_edit_lesson(request.user, sheet.lesson):
-            raise PermissionDenied('Professor só pode editar presença no dia da lição.')
+        if not can_edit_attendance_sheet(request.user, sheet):
+            raise PermissionDenied('Você não pode editar este registro da EBD.')
 
         serializer = AttendanceBulkUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -50,8 +87,8 @@ class AttendanceSheetViewSet(viewsets.ModelViewSet):
                 defaults={'presente': bool(item.get('presente', False)), 'updated_by': request.user},
             )
 
-        if request.data.get('finalize_sheet'):
-            sheet.finalized_at = timezone.now()
+        if sheet.finalized_at is not None:
+            sheet.finalized_at = None
             sheet.updated_by = request.user
             sheet.save(update_fields=['finalized_at', 'updated_by', 'updated_at'])
 
@@ -59,9 +96,11 @@ class AttendanceSheetViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, module_permission('frequencia', 'visualizar')])
 def lesson_class_attendance(request, lesson_id, class_id):
-    org = get_user_organization(request)
+    from core.tenant import get_operational_organization
+
+    org = get_operational_organization(request)
     sheet = AttendanceSheet.objects.filter(
         lesson_id=lesson_id,
         class_group_id=class_id,

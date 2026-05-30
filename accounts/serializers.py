@@ -1,14 +1,25 @@
+from django.db import transaction
 from rest_framework import serializers
 
-from access_control.constants import ROLE_LABELS
-from access_control.models import UserRole
+from access_control.constants import (
+    CANONICAL_ROLES,
+    ROLE_ADMINISTRADOR,
+    ROLE_LABELS,
+    ROLE_PROFESSOR,
+    ROLE_SECRETARIO_CAMPO,
+    ROLE_SECRETARIO_IGREJA,
+)
+from access_control.models import Role, UserRole
 from core.scoping import (
     get_accessible_organizations,
     get_effective_permissions,
     get_teaching_class_ids,
     is_admin_sistema,
+    is_campo_organization,
+    is_organization_contract_active,
     user_requires_context_selection,
 )
+from core.tenant import resolve_active_organization
 from organizations.models import OrganizationMembership
 
 from .models import User
@@ -23,7 +34,11 @@ def resolve_active_organization_from_user(user, request=None):
         except Exception:
             pass
     if user.active_organization_id:
-        return user.active_organization
+        from organizations.models import Organization
+
+        org = Organization.objects.filter(id=user.active_organization_id).select_related('parent').first()
+        if org and is_organization_contract_active(org):
+            return org
     accessible = list(get_accessible_organizations(user))
     if len(accessible) == 1:
         return accessible[0]
@@ -54,15 +69,76 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
-    senha = serializers.CharField(write_only=True, min_length=6)
+    senha = serializers.CharField(write_only=True, min_length=6, default='123456')
+    papel = serializers.ChoiceField(choices=[(role, role) for role in CANONICAL_ROLES])
 
     class Meta:
         model = User
-        fields = ['id', 'nome', 'email', 'is_active', 'senha']
+        fields = ['id', 'nome', 'email', 'is_active', 'senha', 'papel']
 
+    def validate_papel(self, value):
+        request = self.context.get('request')
+        if request and value == ROLE_ADMINISTRADOR and not is_admin_sistema(request.user):
+            raise serializers.ValidationError('Sem permissão para criar administrador do sistema.')
+        return value
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value.strip()).exists():
+            raise serializers.ValidationError('Já existe um usuário com este e-mail.')
+        return value.strip().lower()
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if not request:
+            return attrs
+
+        papel = attrs.get('papel')
+        if papel == ROLE_ADMINISTRADOR:
+            return attrs
+
+        org = resolve_active_organization(request, required=False)
+        if not org:
+            raise serializers.ValidationError({'detail': 'Selecione uma organização no contexto.'})
+
+        if papel in (ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR) and is_campo_organization(org):
+            raise serializers.ValidationError(
+                {'papel': 'Selecione uma igreja no contexto para este perfil.'}
+            )
+        if papel == ROLE_SECRETARIO_CAMPO and not is_campo_organization(org):
+            raise serializers.ValidationError({'papel': 'Secretário de campo exige contexto de campo.'})
+        return attrs
+
+    @transaction.atomic
     def create(self, validated_data):
+        papel = validated_data.pop('papel')
         password = validated_data.pop('senha')
-        return User.objects.create_user(password=password, **validated_data)
+        request = self.context.get('request')
+
+        user = User.objects.create_user(password=password, **validated_data)
+
+        if papel == ROLE_ADMINISTRADOR:
+            role_org = None
+        else:
+            org = resolve_active_organization(request, required=True)
+            role_org = org
+
+            OrganizationMembership.objects.update_or_create(
+                user=user,
+                organization=org,
+                defaults={'ativo': True, 'role_scope': papel.lower()},
+            )
+
+        role = Role.objects.filter(nome=papel, ativo=True).first()
+        if not role:
+            raise serializers.ValidationError({'papel': 'Perfil não encontrado.'})
+
+        UserRole.objects.create(user=user, role=role, organization=role_org, ativo=True)
+
+        if papel in (ROLE_SECRETARIO_CAMPO, ROLE_SECRETARIO_IGREJA) and not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=['is_staff'])
+
+        return user
 
 
 class MeSerializer(serializers.ModelSerializer):
@@ -74,6 +150,8 @@ class MeSerializer(serializers.ModelSerializer):
     permissoes = serializers.SerializerMethodField()
     turmas = serializers.SerializerMethodField()
     is_admin_sistema = serializers.SerializerMethodField()
+    acesso_bloqueado = serializers.SerializerMethodField()
+    motivo_bloqueio = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -90,6 +168,8 @@ class MeSerializer(serializers.ModelSerializer):
             'permissoes',
             'turmas',
             'is_admin_sistema',
+            'acesso_bloqueado',
+            'motivo_bloqueio',
         ]
 
     def _serialize_org(self, org):
@@ -193,14 +273,35 @@ class MeSerializer(serializers.ModelSerializer):
     def get_is_admin_sistema(self, obj):
         return is_admin_sistema(obj)
 
+    def get_acesso_bloqueado(self, obj):
+        if is_admin_sistema(obj):
+            return False
+        if not obj.is_active:
+            return True
+        if get_accessible_organizations(obj):
+            return False
+        has_org_role = UserRole.objects.filter(user=obj, ativo=True, organization_id__isnull=False).exists()
+        return has_org_role
+
+    def get_motivo_bloqueio(self, obj):
+        if not self.get_acesso_bloqueado(obj):
+            return None
+        if not obj.is_active:
+            return 'USUARIO_INATIVO'
+        return 'ORGANIZACAO_INATIVA'
+
 
 class UserContextUpdateSerializer(serializers.Serializer):
     organization_id = serializers.IntegerField()
 
     def validate_organization_id(self, value):
         user = self.context['request'].user
-        from core.scoping import can_access_organization
+        from core.scoping import can_access_organization, is_organization_contract_active
+        from organizations.models import Organization
 
         if not can_access_organization(user, value):
+            org = Organization.objects.filter(id=value).select_related('parent').first()
+            if org and not is_organization_contract_active(org):
+                raise serializers.ValidationError('O acesso a esta organização está suspenso.')
             raise serializers.ValidationError('Organização fora do escopo do usuário.')
         return value

@@ -46,6 +46,13 @@ class UserViewSet(
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        output = UserSerializer(user, context={'request': request})
+        return Response(output.data, status=status.HTTP_201_CREATED)
+
     @action(methods=['POST'], detail=True, url_path='toggle-active')
     def toggle_active(self, request, pk=None):
         user = self.get_object()

@@ -46,6 +46,12 @@ class AttendanceSheetViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet)
     def perform_create(self, serializer):
         lesson = serializer.validated_data['lesson']
         class_group = serializer.validated_data['class_group']
+        if not serializer.validated_data.get('professor'):
+            from lessons.models import LessonSchedule
+
+            schedule = LessonSchedule.objects.filter(lesson=lesson, class_group=class_group).first()
+            if schedule and schedule.professor_id:
+                serializer.validated_data['professor'] = schedule.professor
         preview = AttendanceSheet(lesson=lesson, class_group=class_group)
         if not can_edit_attendance_sheet(self.request.user, preview):
             raise PermissionDenied(

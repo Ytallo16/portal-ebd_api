@@ -1,5 +1,6 @@
 from access_control.constants import (
     ADMIN_ROLES,
+    FULL_OPERATIONAL_ROLES,
     OPERATIONAL_ORG_TYPES,
     OPERATIONAL_ORG_TYPES_LEGACY,
     ROLE_ADMINISTRADOR,
@@ -30,6 +31,27 @@ def is_igreja_organization(org):
 
 def is_igreja_individual(org):
     return is_igreja_organization(org) and not org.parent_id and org.formato == FORMATO_IGREJA_INDIVIDUAL
+
+
+def is_organization_contract_active(org):
+    """Contrato ativo: campo próprio ou igreja + campo pai ativos."""
+    if org is None:
+        return False
+    if not org.is_active:
+        return False
+    if is_campo_organization(org):
+        return True
+    if is_igreja_organization(org) and org.parent_id:
+        parent = org.parent if hasattr(org, 'parent') and org.parent_id else None
+        if parent is None:
+            parent = Organization.objects.filter(id=org.parent_id).first()
+        return bool(parent and parent.is_active)
+    return True
+
+
+def filter_organizations_with_active_contract(queryset):
+    orgs = list(queryset.select_related('parent'))
+    return [org for org in orgs if is_organization_contract_active(org)]
 
 
 def get_campo_root(org):
@@ -86,7 +108,8 @@ def get_active_user_roles(user):
 
 def get_accessible_organization_ids(user):
     if is_admin_sistema(user):
-        return list(Organization.objects.filter(is_active=True).values_list('id', flat=True))
+        orgs = Organization.objects.filter(is_active=True).select_related('parent')
+        return [org.id for org in orgs if is_organization_contract_active(org)]
 
     org_ids = set()
     for user_role in get_active_user_roles(user):
@@ -95,18 +118,31 @@ def get_accessible_organization_ids(user):
             org_ids.update(get_org_descendant_ids(user_role.organization))
         elif role_name in (ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR) and user_role.organization_id:
             org_ids.add(user_role.organization_id)
-    return list(org_ids)
+
+    if not org_ids:
+        return []
+
+    orgs = Organization.objects.filter(id__in=org_ids, is_active=True).select_related('parent')
+    return [org.id for org in orgs if is_organization_contract_active(org)]
 
 
 def get_accessible_organizations(user):
     org_ids = get_accessible_organization_ids(user)
-    return Organization.objects.filter(id__in=org_ids, is_active=True).select_related('parent').order_by('nome')
+    if not org_ids:
+        return []
+    orgs = Organization.objects.filter(id__in=org_ids, is_active=True).select_related('parent').order_by('nome')
+    return [org for org in orgs if is_organization_contract_active(org)]
 
 
 def can_access_organization(user, org_id):
     if is_admin_sistema(user):
-        return Organization.objects.filter(id=org_id, is_active=True).exists()
-    return org_id in get_accessible_organization_ids(user)
+        org = Organization.objects.filter(id=org_id).select_related('parent').first()
+        return bool(org and is_organization_contract_active(org))
+
+    if org_id not in set(get_accessible_organization_ids(user)):
+        return False
+    org = Organization.objects.filter(id=org_id).select_related('parent').first()
+    return bool(org and is_organization_contract_active(org))
 
 
 def can_manage_igrejas(user, active_org):
@@ -159,6 +195,13 @@ def user_is_professor(user, organization=None):
     return roles.exists()
 
 
+def is_somente_professor(user, organization):
+    if is_admin_sistema(user):
+        return False
+    role_names = {user_role.role.nome for user_role in get_roles_for_active_org(user, organization)}
+    return ROLE_PROFESSOR in role_names and not role_names.intersection(FULL_OPERATIONAL_ROLES)
+
+
 def get_teaching_class_ids(user, organization):
     from classrooms.models import ClassTeacher
 
@@ -190,6 +233,14 @@ def get_effective_permissions(user, active_org):
             )
             for action in ('visualizar', 'criar', 'editar', 'excluir', 'aprovar'):
                 current[action] = current[action] or getattr(perm, action, False)
+
+    if active_org and is_somente_professor(user, active_org):
+        turmas = permissions.get('turmas')
+        if turmas:
+            turmas['criar'] = False
+            turmas['editar'] = False
+            turmas['excluir'] = False
+            turmas['aprovar'] = False
 
     if is_admin_sistema(user):
         for module_perm in ModulePermission.objects.all():

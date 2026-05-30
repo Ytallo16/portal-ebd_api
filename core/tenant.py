@@ -1,9 +1,25 @@
 from rest_framework.exceptions import ValidationError
 
-from core.scoping import can_access_organization, get_accessible_organizations, is_campo_organization
+from core.scoping import (
+    can_access_organization,
+    get_accessible_organizations,
+    is_campo_organization,
+    is_organization_contract_active,
+)
 from organizations.models import Organization
 
 ORG_HEADER = 'HTTP_X_ORGANIZATION_ID'
+ORG_INACTIVE_CODE = 'ORGANIZACAO_INATIVA'
+
+
+class OrganizationInactiveError(ValidationError):
+    default_detail = 'O acesso a esta organização está suspenso.'
+    default_code = ORG_INACTIVE_CODE
+
+    def __init__(self, detail=None, code=None):
+        super().__init__(
+            {'detail': detail or self.default_detail, 'code': code or ORG_INACTIVE_CODE}
+        )
 
 
 def _parse_org_id(raw_value):
@@ -34,11 +50,16 @@ def resolve_active_organization(request, required=True):
             return None
 
     if not can_access_organization(user, org_id):
+        org = Organization.objects.filter(id=org_id).select_related('parent').first()
+        if org and not is_organization_contract_active(org):
+            raise OrganizationInactiveError()
         raise ValidationError({'detail': 'Organização fora do escopo do usuário.'})
 
-    org = Organization.objects.filter(id=org_id, is_active=True).select_related('parent').first()
+    org = Organization.objects.filter(id=org_id).select_related('parent').first()
     if not org:
         raise ValidationError({'detail': 'Organização não encontrada.'})
+    if not is_organization_contract_active(org):
+        raise OrganizationInactiveError()
     return org
 
 

@@ -87,7 +87,10 @@ class LessonViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
 
         class_ids = self.get_teaching_class_filter(org)
         if class_ids is not None:
-            queryset = queryset.filter(attendance_sheets__class_group_id__in=class_ids).distinct()
+            queryset = queryset.filter(
+                Q(attendance_sheets__class_group_id__in=class_ids)
+                | Q(schedules__professor=self.request.user)
+            ).distinct()
 
         return queryset
 

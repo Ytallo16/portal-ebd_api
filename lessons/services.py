@@ -1,5 +1,7 @@
 from datetime import date
 
+from django.db.models import Q
+
 from access_control.constants import ADMIN_ROLES, ROLE_PROFESSOR, SECRETARY_ROLES
 from core.scoping import get_user_role_names
 
@@ -39,7 +41,16 @@ def can_edit_class_lesson_registration(user, class_group, lesson):
         from core.scoping import get_teaching_class_ids
 
         class_ids = get_teaching_class_ids(user, class_group.organization)
-        return class_group.id in class_ids
+        if class_group.id in class_ids:
+            return True
+
+        from .models import LessonSchedule
+
+        return LessonSchedule.objects.filter(
+            lesson=lesson,
+            class_group=class_group,
+            professor=user,
+        ).exists()
 
     return False
 

@@ -45,7 +45,7 @@ ROLE_MODULE_MATRIX = {
     ROLE_ADMINISTRADOR: MODULES,
     ROLE_SECRETARIO_CAMPO: MODULES,
     ROLE_SECRETARIO_IGREJA: MODULES,
-    ROLE_PROFESSOR: ('dashboard', 'alunos', 'licoes', 'frequencia'),
+    ROLE_PROFESSOR: ('dashboard', 'alunos', 'licoes', 'frequencia', 'turmas'),
 }
 
 OPERATIONAL_ORG_TYPES = ('IGREJA',)

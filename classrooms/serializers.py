@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from access_control.models import UserRole
 from lessons.models import Lesson
 
 from .models import ClassGroup, ClassTeacher
@@ -10,7 +11,47 @@ class ClassTeacherSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ClassTeacher
-        fields = ['id', 'user', 'user_nome']
+        fields = ['id', 'class_group', 'user', 'user_nome']
+        read_only_fields = ['id']
+
+    def validate(self, attrs):
+        class_group = attrs.get('class_group') or getattr(self.instance, 'class_group', None)
+        user = attrs.get('user') or getattr(self.instance, 'user', None)
+        if class_group and user:
+            exists = ClassTeacher.objects.filter(class_group=class_group, user=user)
+            if self.instance:
+                exists = exists.exclude(pk=self.instance.pk)
+            if exists.exists():
+                raise serializers.ValidationError({'user': 'Este professor já está vinculado à turma.'})
+
+            outra_turma = (
+                ClassTeacher.objects.filter(
+                    user=user,
+                    class_group__organization=class_group.organization,
+                )
+                .exclude(class_group=class_group)
+                .select_related('class_group')
+                .first()
+            )
+            if outra_turma:
+                raise serializers.ValidationError(
+                    {
+                        'user': (
+                            f'Este professor já leciona na turma {outra_turma.class_group.nome}. '
+                            'Cada usuário só pode ser professor de uma turma.'
+                        )
+                    }
+                )
+
+            is_professor = UserRole.objects.filter(
+                user=user,
+                ativo=True,
+                role__nome='PROFESSOR',
+                organization=class_group.organization,
+            ).exists()
+            if not is_professor:
+                raise serializers.ValidationError({'user': 'O usuário selecionado não é professor desta igreja.'})
+        return attrs
 
 
 class ClassGroupSerializer(serializers.ModelSerializer):

@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import module_permission
+from core.scoping import is_somente_professor
 from core.viewmixins import OrganizationScopedViewMixin
 from lessons.models import Lesson
 from lessons.serializers import LessonSerializer
@@ -31,9 +32,19 @@ class ClassGroupViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
+        organization = self.get_active_organization()
+        if is_somente_professor(self.request.user, organization):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied('Professores não podem criar turmas.')
+        serializer.save(organization=organization, created_by=self.request.user)
 
     def perform_update(self, serializer):
+        organization = self.get_active_organization()
+        if is_somente_professor(self.request.user, organization):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied('Professores não podem editar turmas.')
         serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
@@ -69,12 +80,25 @@ class ClassTeacherViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.get_active_organization()
-        return ClassTeacher.objects.filter(
+        queryset = ClassTeacher.objects.filter(
             class_group__organization=org,
             class_group__is_active=True,
         ).select_related('class_group', 'user')
+        class_id = self.request.query_params.get('class_id')
+        if class_id:
+            queryset = queryset.filter(class_group_id=class_id)
+        return queryset
 
     def get_serializer_class(self):
         from .serializers import ClassTeacherSerializer
 
         return ClassTeacherSerializer
+
+    def perform_create(self, serializer):
+        class_group = serializer.validated_data['class_group']
+        org = self.get_active_organization()
+        if class_group.organization_id != org.id:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError({'class_group': 'Turma inválida para esta igreja.'})
+        serializer.save(created_by=self.request.user)

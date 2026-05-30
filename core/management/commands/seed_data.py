@@ -232,36 +232,51 @@ class Command(BaseCommand):
                     )
 
         paid_students = {s['nome'] for s in students_data[: max(1, len(students_data) // 2)]}
-        for student in students_by_name.values():
-            PublicationControl.objects.update_or_create(
-                organization=church_org,
-                class_group=student.class_group,
-                person_type='aluno',
-                person_name=student.nome,
-                defaults={
-                    'student': student,
-                    'professor': None,
-                    'recebeu': True,
-                    'pagou': student.nome in paid_students,
-                },
+        trimester = (
+            Trimester.objects.filter(organization=church_org, status='EM_ANDAMENTO', is_active=True)
+            .order_by('-ano', '-numero')
+            .first()
+        )
+        if not trimester:
+            trimester = (
+                Trimester.objects.filter(organization=church_org, is_active=True)
+                .order_by('-ano', '-numero')
+                .first()
             )
 
-        for turma in classes_by_name.values():
-            teacher_rel = turma.teachers.order_by('id').first()
-            if not teacher_rel:
-                continue
-            PublicationControl.objects.update_or_create(
-                organization=church_org,
-                class_group=turma,
-                person_type='professor',
-                person_name=teacher_rel.user.nome,
-                defaults={
-                    'student': None,
-                    'professor': teacher_rel.user,
-                    'recebeu': True,
-                    'pagou': True,
-                },
-            )
+        if trimester:
+            for student in students_by_name.values():
+                PublicationControl.objects.update_or_create(
+                    organization=church_org,
+                    class_group=student.class_group,
+                    student=student,
+                    trimester=trimester,
+                    defaults={
+                        'person_type': 'aluno',
+                        'person_name': student.nome,
+                        'professor': None,
+                        'recebeu': True,
+                        'pagou': student.nome in paid_students,
+                    },
+                )
+
+            for turma in classes_by_name.values():
+                teacher_rel = turma.teachers.order_by('id').first()
+                if not teacher_rel:
+                    continue
+                PublicationControl.objects.update_or_create(
+                    organization=church_org,
+                    class_group=turma,
+                    professor=teacher_rel.user,
+                    trimester=trimester,
+                    defaults={
+                        'person_type': 'professor',
+                        'person_name': teacher_rel.user.nome,
+                        'student': None,
+                        'recebeu': True,
+                        'pagou': True,
+                    },
+                )
 
         return len(students_by_name), len(classes_by_name)
 

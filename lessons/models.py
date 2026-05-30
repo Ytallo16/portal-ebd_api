@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 from core.models import AuditModel, OrganizationScopedModel, SoftDeleteModel
@@ -42,3 +43,29 @@ class Lesson(AuditModel, OrganizationScopedModel, SoftDeleteModel):
 
     def __str__(self):
         return f'Lição {self.numero} - {self.tema}'
+
+
+class LessonSchedule(AuditModel, OrganizationScopedModel):
+    """Escala: professor designado para ministrar uma lição em uma turma."""
+
+    lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='schedules')
+    class_group = models.ForeignKey(
+        'classrooms.ClassGroup',
+        on_delete=models.CASCADE,
+        related_name='lesson_schedules',
+    )
+    professor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='lesson_schedules',
+    )
+
+    class Meta:
+        ordering = ['lesson__data', 'class_group__nome']
+        unique_together = ('lesson', 'class_group')
+
+    def __str__(self):
+        prof = self.professor.nome if self.professor_id else '—'
+        return f'{self.class_group.nome} · Lição {self.lesson.numero} · {prof}'

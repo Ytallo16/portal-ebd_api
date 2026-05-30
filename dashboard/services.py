@@ -6,7 +6,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from attendance.models import AttendanceRecord, AttendanceSheet
 from classrooms.models import ClassGroup
 from core.scoping import get_teaching_class_ids, user_is_professor
-from lessons.models import Lesson, Trimester
+from lessons.models import Lesson, LessonSchedule, Trimester
 from students.models import Student
 
 
@@ -226,6 +226,33 @@ def build_professor_dashboard(user, org, class_id=None):
 
     proxima_licao = _find_proxima_licao(list(lessons), sheet_lesson_ids)
 
+    scheduled_qs = (
+        LessonSchedule.objects.filter(
+            class_group=turma,
+            professor=user,
+            lesson__in=lessons,
+        )
+        .select_related('lesson')
+        .order_by('lesson__data', 'lesson__numero')
+    )
+    sheets_by_lesson = {sheet.lesson_id: sheet for sheet in sheets}
+    aulas_escaladas = []
+    for schedule in scheduled_qs:
+        sheet = sheets_by_lesson.get(schedule.lesson_id)
+        presentes = sheet.records.filter(presente=True).count() if sheet else 0
+        ausentes = sheet.records.filter(presente=False).count() if sheet else 0
+        aulas_escaladas.append(
+            {
+                'id': schedule.lesson.id,
+                'numero': schedule.lesson.numero,
+                'tema': schedule.lesson.tema,
+                'data': schedule.lesson.data,
+                'registrada': sheet is not None,
+                'presentes': presentes,
+                'ausentes': ausentes,
+            }
+        )
+
     licoes_pendentes = [
         {
             'id': lesson.id,
@@ -260,6 +287,7 @@ def build_professor_dashboard(user, org, class_id=None):
         },
         'proxima_licao': proxima_licao,
         'ultimo_registro': ultimo_registro,
+        'aulas_escaladas': aulas_escaladas,
         'licoes_pendentes': licoes_pendentes,
         'evolucao_frequencia': _build_evolucao_frequencia(list(sheets)),
         'aniversariantes': _build_aniversariantes(students_qs),

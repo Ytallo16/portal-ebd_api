@@ -21,6 +21,7 @@ class AttendanceSheetSerializer(serializers.ModelSerializer):
             'lesson',
             'class_group',
             'professor',
+            'professor_presente',
             'visitantes',
             'biblias',
             'revistas',

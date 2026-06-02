@@ -8,6 +8,7 @@ class AttendanceSheet(AuditModel):
     lesson = models.ForeignKey('lessons.Lesson', on_delete=models.CASCADE, related_name='attendance_sheets')
     class_group = models.ForeignKey('classrooms.ClassGroup', on_delete=models.CASCADE, related_name='attendance_sheets')
     professor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    professor_presente = models.BooleanField(default=False)
     visitantes = models.PositiveIntegerField(default=0)
     biblias = models.PositiveIntegerField(default=0)
     revistas = models.PositiveIntegerField(default=0)

@@ -177,6 +177,7 @@ class MeSerializer(serializers.ModelSerializer):
             'id': org.id,
             'nome': org.nome,
             'tipo': org.tipo,
+            'formato': org.formato or '',
             'parent_id': org.parent_id,
             'parent_nome': org.parent.nome if org.parent_id else None,
         }

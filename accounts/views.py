@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from core.permissions import module_permission
 from core.scoping import get_org_descendant_ids, is_campo_organization
 from core.tenant import get_user_organization
+from classrooms.models import ClassTeacher
 from organizations.models import Organization, OrganizationMembership
 
 from .models import User
@@ -58,6 +59,13 @@ class UserViewSet(
         user = self.get_object()
         user.is_active = not user.is_active
         user.save(update_fields=['is_active'])
+        if not user.is_active:
+            org = get_user_organization(request)
+            org_ids = get_org_descendant_ids(org) if is_campo_organization(org) else [org.id]
+            ClassTeacher.objects.filter(
+                user=user,
+                class_group__organization_id__in=org_ids,
+            ).delete()
         return Response({'id': user.id, 'is_active': user.is_active})
 
     @action(methods=['POST'], detail=True, url_path='reset-password')
@@ -88,4 +96,7 @@ def update_context(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout(request):
-    return Response({'detail': 'Logout realizado no cliente (JWT stateless).'}, status=status.HTTP_200_OK)
+    response = Response({'detail': 'Logout realizado com sucesso.'}, status=status.HTTP_200_OK)
+    response.delete_cookie('access_token', path='/')
+    response.delete_cookie('refresh_token', path='/')
+    return response

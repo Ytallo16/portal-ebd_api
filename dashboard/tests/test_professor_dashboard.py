@@ -248,3 +248,20 @@ class ProfessorDashboardTests(APITestCase):
         self._login('prof.adultos@test.com')
         response = self.client.get('/api/v1/dashboard/professor?class_id=abc')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_summary_returns_visitors_total(self):
+        self._login('sec@test.com')
+        response = self.client.get('/api/v1/dashboard/summary')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total_visitors'], 3)
+
+    def test_professor_ranking_returns_aggregated_data(self):
+        self._login('sec@test.com')
+        response = self.client.get('/api/v1/dashboard/professor-ranking?ano=2026&trimestre=1')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        row = response.data[0]
+        self.assertEqual(row['professorNome'], 'Prof Adultos')
+        self.assertEqual(row['presencas'], 2)
+        self.assertEqual(row['ausencias'], 0)
+        self.assertEqual(row['turmaNomes'], ['Adultos'])

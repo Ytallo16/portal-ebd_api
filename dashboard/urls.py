@@ -6,6 +6,7 @@ from .views import (
     class_composition,
     offering_evolution,
     professor_dashboard,
+    professor_ranking,
     summary,
 )
 
@@ -16,4 +17,5 @@ urlpatterns = [
     path('dashboard/class-composition', class_composition),
     path('dashboard/birthdays', birthdays),
     path('dashboard/professor', professor_dashboard),
+    path('dashboard/professor-ranking', professor_ranking),
 ]

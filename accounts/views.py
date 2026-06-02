@@ -10,7 +10,15 @@ from classrooms.models import ClassTeacher
 from organizations.models import Organization, OrganizationMembership
 
 from .models import User
-from .serializers import MeSerializer, UserContextUpdateSerializer, UserCreateSerializer, UserSerializer
+from .serializers import (
+    MeAvatarSerializer,
+    MeChangePasswordSerializer,
+    MeSerializer,
+    MeUpdateSerializer,
+    UserContextUpdateSerializer,
+    UserCreateSerializer,
+    UserSerializer,
+)
 
 
 class UserViewSet(
@@ -76,10 +84,53 @@ class UserViewSet(
         return Response({'id': user.id, 'detail': 'Senha redefinida para 123456.'})
 
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def me(request):
-    return Response(MeSerializer(request.user, context={'request': request}).data)
+    if request.method == 'GET':
+        return Response(MeSerializer(request.user, context={'request': request}).data)
+
+    serializer = MeUpdateSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    user = request.user
+    user.nome = serializer.validated_data['nome']
+    user.save(update_fields=['nome', 'first_name', 'last_name', 'username'])
+    return Response(MeSerializer(user, context={'request': request}).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    serializer = MeChangePasswordSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    user = request.user
+    user.set_password(serializer.validated_data['nova_senha'])
+    user.save(update_fields=['password'])
+    return Response({'detail': 'Senha alterada com sucesso.'})
+
+
+def _delete_user_foto(user):
+    if user.foto:
+        user.foto.delete(save=False)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def me_avatar(request):
+    user = request.user
+
+    if request.method == 'DELETE':
+        _delete_user_foto(user)
+        user.foto = None
+        user.save(update_fields=['foto'])
+        return Response(MeSerializer(user, context={'request': request}).data)
+
+    serializer = MeAvatarSerializer(data=request.data, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    _delete_user_foto(user)
+    user.foto = serializer.validated_data['foto']
+    user.save(update_fields=['foto'])
+    return Response(MeSerializer(user, context={'request': request}).data)
 
 
 @api_view(['PATCH'])

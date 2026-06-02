@@ -38,6 +38,7 @@ class User(AbstractUser):
         on_delete=models.SET_NULL,
         related_name='active_users',
     )
+    foto = models.ImageField(upload_to='avatars/', null=True, blank=True)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = []

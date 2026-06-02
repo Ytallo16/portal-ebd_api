@@ -96,6 +96,20 @@ def get_user_role_names(user):
     }
 
 
+def get_creatable_user_roles(user):
+    from access_control.constants import CANONICAL_ROLES
+
+    if is_admin_sistema(user):
+        return set(CANONICAL_ROLES)
+
+    role_names = get_user_role_names(user)
+    if ROLE_SECRETARIO_CAMPO in role_names:
+        return {ROLE_SECRETARIO_CAMPO, ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR}
+    if ROLE_SECRETARIO_IGREJA in role_names:
+        return {ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR}
+    return set()
+
+
 def is_admin_sistema(user):
     if user.is_superuser:
         return True
@@ -241,6 +255,10 @@ def get_effective_permissions(user, active_org):
             turmas['editar'] = False
             turmas['excluir'] = False
             turmas['aprovar'] = False
+        usuarios = permissions.get('usuarios')
+        if usuarios:
+            for action in ('visualizar', 'criar', 'editar', 'excluir', 'aprovar'):
+                usuarios[action] = False
 
     if is_admin_sistema(user):
         for module_perm in ModulePermission.objects.all():

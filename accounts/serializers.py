@@ -12,6 +12,7 @@ from access_control.constants import (
 from access_control.models import Role, UserRole
 from core.scoping import (
     get_accessible_organizations,
+    get_creatable_user_roles,
     get_effective_permissions,
     get_teaching_class_ids,
     is_admin_sistema,
@@ -80,6 +81,10 @@ class UserCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and value == ROLE_ADMINISTRADOR and not is_admin_sistema(request.user):
             raise serializers.ValidationError('Sem permissão para criar administrador do sistema.')
+        if request and not is_admin_sistema(request.user):
+            allowed_roles = get_creatable_user_roles(request.user)
+            if value not in allowed_roles:
+                raise serializers.ValidationError('Sem permissão para criar este perfil.')
         return value
 
     def validate_email(self, value):
@@ -152,6 +157,7 @@ class MeSerializer(serializers.ModelSerializer):
     is_admin_sistema = serializers.SerializerMethodField()
     acesso_bloqueado = serializers.SerializerMethodField()
     motivo_bloqueio = serializers.SerializerMethodField()
+    foto_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -160,6 +166,7 @@ class MeSerializer(serializers.ModelSerializer):
             'nome',
             'email',
             'is_active',
+            'foto_url',
             'papeis',
             'papeis_detalhados',
             'organizacoes_disponiveis',
@@ -171,6 +178,15 @@ class MeSerializer(serializers.ModelSerializer):
             'acesso_bloqueado',
             'motivo_bloqueio',
         ]
+
+    def get_foto_url(self, obj):
+        if not obj.foto:
+            return None
+        request = self.context.get('request')
+        url = obj.foto.url
+        if request is not None:
+            return request.build_absolute_uri(url)
+        return url
 
     def _serialize_org(self, org):
         return {
@@ -305,4 +321,44 @@ class UserContextUpdateSerializer(serializers.Serializer):
             if org and not is_organization_contract_active(org):
                 raise serializers.ValidationError('O acesso a esta organização está suspenso.')
             raise serializers.ValidationError('Organização fora do escopo do usuário.')
+        return value
+
+
+class MeUpdateSerializer(serializers.Serializer):
+    nome = serializers.CharField(max_length=255)
+
+    def validate_nome(self, value):
+        nome = value.strip()
+        if len(nome) < 2:
+            raise serializers.ValidationError('O nome deve ter pelo menos 2 caracteres.')
+        return nome
+
+
+class MeChangePasswordSerializer(serializers.Serializer):
+    senha_atual = serializers.CharField(write_only=True)
+    nova_senha = serializers.CharField(write_only=True, min_length=6)
+    confirmar_senha = serializers.CharField(write_only=True, min_length=6)
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        if not user.check_password(attrs['senha_atual']):
+            raise serializers.ValidationError({'senha_atual': 'Senha atual incorreta.'})
+        if attrs['nova_senha'] != attrs['confirmar_senha']:
+            raise serializers.ValidationError({'confirmar_senha': 'As senhas não coincidem.'})
+        return attrs
+
+
+ALLOWED_AVATAR_CONTENT_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024
+
+
+class MeAvatarSerializer(serializers.Serializer):
+    foto = serializers.ImageField()
+
+    def validate_foto(self, value):
+        content_type = getattr(value, 'content_type', None)
+        if content_type and content_type not in ALLOWED_AVATAR_CONTENT_TYPES:
+            raise serializers.ValidationError('Formato inválido. Use JPEG, PNG ou WebP.')
+        if value.size > MAX_AVATAR_SIZE_BYTES:
+            raise serializers.ValidationError('A imagem deve ter no máximo 5 MB.')
         return value

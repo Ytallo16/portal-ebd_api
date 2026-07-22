@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: portal_ebd_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-portal_ebd}
+      POSTGRES_USER: ${POSTGRES_USER:-portal_ebd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-portal_ebd}
+    volumes:
+      - portal_ebd_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portal_ebd} -d ${POSTGRES_DB:-portal_ebd}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: portal_ebd_backend
+    restart: unless-stopped
+    entrypoint: ["/app/docker/entrypoint.prod.sh"]
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    volumes:
+      - ./:/app
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8020}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  portal_ebd_pgdata:

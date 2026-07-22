@@ -4,6 +4,10 @@ set -e
 # Migrations (já commitadas no repositório)
 python manage.py migrate --noinput
 
+# Papéis e permissões canônicos (idempotente, sem dados demo) — necessário para
+# criar usuários numa instalação limpa.
+python manage.py seed_roles
+
 # Arquivos estáticos servidos pelo Nginx a partir de /app/staticfiles
 python manage.py collectstatic --noinput
 

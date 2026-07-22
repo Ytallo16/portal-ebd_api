@@ -4,8 +4,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.permissions import module_permission
-from core.scoping import get_org_descendant_ids, is_campo_organization
-from core.tenant import get_user_organization
+from core.scoping import get_org_descendant_ids, is_admin_sistema, is_campo_organization
+from core.tenant import get_user_organization, resolve_active_organization
 from classrooms.models import ClassTeacher
 from organizations.models import Organization, OrganizationMembership
 
@@ -31,7 +31,12 @@ class UserViewSet(
     search_fields = ['nome', 'email']
 
     def get_queryset(self):
-        org = get_user_organization(self.request)
+        org = resolve_active_organization(self.request, required=False)
+        if org is None:
+            # Sem contexto ativo (ex.: admin do sistema numa instalação nova).
+            if is_admin_sistema(self.request.user):
+                return User.objects.all().order_by('nome')
+            return User.objects.none()
         org_ids = get_org_descendant_ids(org) if is_campo_organization(org) else [org.id]
         user_ids = OrganizationMembership.objects.filter(
             organization_id__in=org_ids,

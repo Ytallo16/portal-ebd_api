@@ -17,13 +17,16 @@ class HasModulePermission(BasePermission):
         if not self.module or not self.action:
             return True
 
+        # Admin do sistema tem acesso a tudo, mesmo sem contexto ativo (ex.: criar o
+        # primeiro usuário/organização numa instalação nova). Checado antes de exigir
+        # organização, pois resolve_active_organization(required=True) lança sem contexto.
+        if is_admin_sistema(user):
+            return True
+
         try:
             org = resolve_active_organization(request, required=self.require_organization)
         except ValidationError:
             return False
-
-        if is_admin_sistema(user):
-            return True
 
         if org is None:
             return False

@@ -1,4 +1,4 @@
-from django.db import transaction
+from django.db import models, transaction
 from rest_framework import serializers
 
 from access_control.constants import (
@@ -14,6 +14,7 @@ from core.scoping import (
     get_accessible_organizations,
     get_creatable_user_roles,
     get_effective_permissions,
+    get_org_descendant_ids,
     get_teaching_class_ids,
     is_admin_sistema,
     is_campo_organization,
@@ -144,6 +145,129 @@ class UserCreateSerializer(serializers.ModelSerializer):
             user.save(update_fields=['is_staff'])
 
         return user
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    """Edição de usuário existente, incluindo troca do perfil de acesso.
+
+    `papel` é opcional: quando ausente, apenas os dados cadastrais mudam.
+    """
+
+    papel = serializers.ChoiceField(
+        choices=[(role, role) for role in CANONICAL_ROLES],
+        required=False,
+        write_only=True,
+    )
+    papeis = serializers.SerializerMethodField()
+    organizacoes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'nome', 'email', 'is_active', 'date_joined', 'papeis', 'organizacoes', 'papel']
+
+    get_papeis = UserSerializer.get_papeis
+    get_organizacoes = UserSerializer.get_organizacoes
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exclude(pk=self.instance.pk).exists():
+            raise serializers.ValidationError('Já existe um usuário com este e-mail.')
+        return email
+
+    def validate_papel(self, value):
+        request = self.context.get('request')
+        if not request:
+            return value
+        if request.user.id == self.instance.id:
+            raise serializers.ValidationError('Você não pode alterar o seu próprio perfil de acesso.')
+        if value == ROLE_ADMINISTRADOR and not is_admin_sistema(request.user):
+            raise serializers.ValidationError('Sem permissão para conceder o perfil de administrador do sistema.')
+        if not is_admin_sistema(request.user) and value not in get_creatable_user_roles(request.user):
+            raise serializers.ValidationError('Sem permissão para conceder este perfil.')
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        papel = attrs.get('papel')
+        if not request or papel is None or papel == ROLE_ADMINISTRADOR:
+            return attrs
+
+        org = resolve_active_organization(request, required=False)
+        if not org:
+            raise serializers.ValidationError({'detail': 'Selecione uma organização no contexto.'})
+
+        if papel in (ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR) and is_campo_organization(org):
+            raise serializers.ValidationError(
+                {'papel': 'Selecione uma igreja no contexto para este perfil.'}
+            )
+        if papel == ROLE_SECRETARIO_CAMPO and not is_campo_organization(org):
+            raise serializers.ValidationError({'papel': 'Secretário de campo exige contexto de campo.'})
+        return attrs
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        papel = validated_data.pop('papel', None)
+        user = super().update(instance, validated_data)
+        if papel is not None:
+            self._aplicar_papel(user, papel)
+        return user
+
+    def _aplicar_papel(self, user, papel):
+        request = self.context.get('request')
+        role = Role.objects.filter(nome=papel, ativo=True).first()
+        if not role:
+            raise serializers.ValidationError({'papel': 'Perfil não encontrado.'})
+
+        if papel == ROLE_ADMINISTRADOR:
+            role_org = None
+        else:
+            role_org = resolve_active_organization(request, required=True)
+
+        papeis_anteriores = set(
+            UserRole.objects.filter(user=user, ativo=True)
+            .select_related('role')
+            .values_list('role__nome', flat=True)
+        )
+
+        # O escopo do papel anterior pode ser a organização ativa (perfis operacionais)
+        # ou nulo (administrador do sistema); ambos são desativados na troca.
+        UserRole.objects.filter(user=user, ativo=True).filter(
+            models.Q(organization=role_org) | models.Q(organization__isnull=True)
+        ).exclude(role=role).update(ativo=False)
+
+        UserRole.objects.update_or_create(
+            user=user,
+            role=role,
+            organization=role_org,
+            defaults={'ativo': True},
+        )
+
+        if role_org is not None:
+            OrganizationMembership.objects.update_or_create(
+                user=user,
+                organization=role_org,
+                defaults={'ativo': True, 'role_scope': papel.lower()},
+            )
+
+        deve_ser_staff = papel in (ROLE_SECRETARIO_CAMPO, ROLE_SECRETARIO_IGREJA)
+        if deve_ser_staff and not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=['is_staff'])
+
+        # Quem deixa de ser professor perde os vínculos de turma da organização,
+        # mesma limpeza feita ao desativar um usuário.
+        if ROLE_PROFESSOR in papeis_anteriores and papel != ROLE_PROFESSOR:
+            from classrooms.models import ClassTeacher
+
+            vinculos = ClassTeacher.objects.filter(user=user)
+            if role_org is not None:
+                org_ids = (
+                    get_org_descendant_ids(role_org)
+                    if is_campo_organization(role_org)
+                    else [role_org.id]
+                )
+                vinculos = vinculos.filter(class_group__organization_id__in=org_ids)
+            vinculos.delete()
 
 
 class MeSerializer(serializers.ModelSerializer):

@@ -18,6 +18,7 @@ from .serializers import (
     UserContextUpdateSerializer,
     UserCreateSerializer,
     UserSerializer,
+    UserUpdateSerializer,
 )
 
 
@@ -47,6 +48,8 @@ class UserViewSet(
     def get_serializer_class(self):
         if self.action == 'create':
             return UserCreateSerializer
+        if self.action in ('update', 'partial_update'):
+            return UserUpdateSerializer
         return UserSerializer
 
     def get_permissions(self):

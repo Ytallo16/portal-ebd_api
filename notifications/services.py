@@ -1,15 +1,18 @@
 from dataclasses import dataclass
-from datetime import date
-
 from django.db import transaction
 from django.utils import timezone
 
 from access_control.constants import FULL_OPERATIONAL_ROLES
 from attendance.models import AttendanceSheet
 from classrooms.models import ClassGroup
-from core.scoping import get_roles_for_active_org, get_teaching_class_ids, is_admin_sistema
+from core.scoping import (
+    get_roles_for_active_org,
+    get_teaching_class_ids,
+    is_admin_sistema,
+    is_somente_professor,
+)
 from dashboard.services import _build_aniversariantes, _trimestre_referencia
-from lessons.models import Lesson, LessonSchedule
+from lessons.models import Lesson
 from publications.models import PublicationControl
 
 from .constants import (
@@ -61,7 +64,7 @@ def _collect_professor_desired(user, org):
     if not trimestre:
         return []
 
-    today = date.today()
+    today = timezone.localdate()
     desired = []
     attendance_count = 0
 
@@ -70,24 +73,35 @@ def _collect_professor_desired(user, org):
             organization=org,
             trimestre=trimestre.numero,
             ano=trimestre.ano,
+            status='ABERTA',
             is_active=True,
         ).order_by('data', 'numero')
     )
     lesson_ids = [lesson.id for lesson in lessons]
 
     for class_id in class_ids:
-        turma = ClassGroup.objects.filter(id=class_id, organization=org, is_active=True).first()
+        turma = ClassGroup.objects.filter(
+            id=class_id,
+            organization=org,
+            ativa=True,
+            is_active=True,
+        ).first()
         if not turma:
             continue
 
-        sheet_lesson_ids = set(
+        completed_lesson_ids = set(
             AttendanceSheet.objects.filter(
                 class_group_id=class_id,
                 lesson_id__in=lesson_ids,
+                finalized_at__isnull=False,
             ).values_list('lesson_id', flat=True)
         )
 
-        pending_lessons = [lesson for lesson in lessons if lesson.id not in sheet_lesson_ids]
+        pending_lessons = [
+            lesson
+            for lesson in lessons
+            if lesson.data < today and lesson.id not in completed_lesson_ids
+        ]
         for lesson in pending_lessons[:MAX_ATTENDANCE_NOTIFICATIONS]:
             if attendance_count >= MAX_ATTENDANCE_NOTIFICATIONS:
                 break
@@ -109,16 +123,9 @@ def _collect_professor_desired(user, org):
             )
             attendance_count += 1
 
-        schedules_today = LessonSchedule.objects.filter(
-            class_group_id=class_id,
-            professor=user,
-            lesson__in=lessons,
-            lesson__data=today,
-        ).select_related('lesson', 'class_group')
-
-        for schedule in schedules_today:
-            lesson = schedule.lesson
-            if lesson.id in sheet_lesson_ids:
+        lessons_today = [lesson for lesson in lessons if lesson.data == today]
+        for lesson in lessons_today:
+            if lesson.id in completed_lesson_ids:
                 continue
             desired.append(
                 DesiredNotification(
@@ -136,7 +143,11 @@ def _collect_professor_desired(user, org):
                 )
             )
 
-        students_qs = turma.students.filter(organization=org, is_active=True)
+        students_qs = turma.students.filter(
+            organization=org,
+            ativo=True,
+            is_active=True,
+        )
         birthdays = _build_aniversariantes(students_qs, today=today, horizon_days=0)
         if birthdays:
             nomes = ', '.join(item['nome'] for item in birthdays[:3])
@@ -162,7 +173,7 @@ def _collect_secretary_desired(user, org):
     if not _user_has_operational_role(user, org):
         return []
 
-    today = date.today()
+    today = timezone.localdate()
     desired = []
     trimestre = _trimestre_referencia(org)
 
@@ -182,7 +193,11 @@ def _collect_secretary_desired(user, org):
     for lesson in lessons_to_finalize[:10]:
         pending_turmas = []
         for class_group in active_classes:
-            if not AttendanceSheet.objects.filter(lesson=lesson, class_group=class_group).exists():
+            if not AttendanceSheet.objects.filter(
+                lesson=lesson,
+                class_group=class_group,
+                finalized_at__isnull=False,
+            ).exists():
                 pending_turmas.append(class_group.nome)
         if pending_turmas:
             turmas_txt = ', '.join(pending_turmas[:3])
@@ -190,11 +205,11 @@ def _collect_secretary_desired(user, org):
                 turmas_txt = f'{turmas_txt} e mais {len(pending_turmas) - 3}'
             desired.append(
                 DesiredNotification(
-                    dedupe_key=f'lesson_finalize:lesson:{lesson.id}',
-                    kind=KIND_LESSON_FINALIZE,
-                    title=f'Lição {lesson.numero} aguardando encerramento',
+                    dedupe_key=f'attendance_pending:lesson:{lesson.id}',
+                    kind=KIND_ATTENDANCE_PENDING,
+                    title=f'Chamadas pendentes — Lição {lesson.numero}',
                     body=(
-                        f'{lesson.tema} — registre ou finalize após concluir as turmas: {turmas_txt}.'
+                        f'{lesson.tema} — conclua a chamada das turmas: {turmas_txt}.'
                     ),
                     action_path=_licao_path(lesson),
                     severity=SEVERITY_WARNING,
@@ -202,6 +217,25 @@ def _collect_secretary_desired(user, org):
                         'lesson_id': lesson.id,
                         'lesson_numero': lesson.numero,
                         'turmas_pendentes': pending_turmas,
+                    },
+                )
+            )
+        else:
+            desired.append(
+                DesiredNotification(
+                    dedupe_key=f'lesson_finalize:lesson:{lesson.id}',
+                    kind=KIND_LESSON_FINALIZE,
+                    title=f'Lição {lesson.numero} pronta para encerrar',
+                    body=(
+                        f'{lesson.tema} — todas as chamadas foram concluídas. '
+                        'Finalize a lição.'
+                    ),
+                    action_path=_licao_path(lesson),
+                    severity=SEVERITY_WARNING,
+                    metadata={
+                        'lesson_id': lesson.id,
+                        'lesson_numero': lesson.numero,
+                        'turmas_pendentes': [],
                     },
                 )
             )
@@ -231,7 +265,11 @@ def _collect_secretary_desired(user, org):
 
     from students.models import Student
 
-    students_qs = Student.objects.filter(organization=org, is_active=True)
+    students_qs = Student.objects.filter(
+        organization=org,
+        ativo=True,
+        is_active=True,
+    )
     birthdays = _build_aniversariantes(students_qs, today=today, horizon_days=0)
     if birthdays:
         nomes = ', '.join(item['nome'] for item in birthdays[:3])
@@ -255,8 +293,7 @@ def _collect_secretary_desired(user, org):
 
 def collect_desired_notifications(user, org):
     desired = []
-    class_ids = get_teaching_class_ids(user, org)
-    if class_ids:
+    if is_somente_professor(user, org):
         desired.extend(_collect_professor_desired(user, org))
     if _user_has_operational_role(user, org):
         desired.extend(_collect_secretary_desired(user, org))

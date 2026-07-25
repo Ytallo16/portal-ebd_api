@@ -1,25 +1,30 @@
 from datetime import date
 
-from django.db.models import Q
-
-from access_control.constants import ADMIN_ROLES, ROLE_PROFESSOR, SECRETARY_ROLES
-from core.scoping import get_user_role_names
+from access_control.constants import ROLE_PROFESSOR, SECRETARY_ROLES
+from core.scoping import get_role_names_for_organization, is_admin_sistema
 
 
-def can_manage_trimesters(user):
-    if user.is_superuser:
+def can_manage_lessons(user, organization):
+    if is_admin_sistema(user):
         return True
 
-    role_names = get_user_role_names(user)
-    return bool(role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES))
+    role_names = get_role_names_for_organization(user, organization)
+    return bool(role_names.intersection(SECRETARY_ROLES))
+
+
+def can_manage_trimesters(user, organization):
+    return can_manage_lessons(user, organization)
 
 
 def can_edit_lesson(user, lesson):
-    if user.is_superuser:
+    if is_admin_sistema(user):
         return True
 
-    role_names = get_user_role_names(user)
-    if role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
+    role_names = get_role_names_for_organization(
+        user,
+        getattr(lesson, 'organization', None),
+    )
+    if role_names.intersection(SECRETARY_ROLES):
         return True
 
     if ROLE_PROFESSOR in role_names:
@@ -30,11 +35,11 @@ def can_edit_lesson(user, lesson):
 
 def can_edit_class_lesson_registration(user, class_group, lesson):
     """Presenças, totais (bíblias, revistas, ofertas, visitantes) na ficha da turma."""
-    if user.is_superuser:
+    if is_admin_sistema(user):
         return True
 
-    role_names = get_user_role_names(user)
-    if role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
+    role_names = get_role_names_for_organization(user, class_group.organization)
+    if role_names.intersection(SECRETARY_ROLES):
         return True
 
     if ROLE_PROFESSOR in role_names:
@@ -56,16 +61,8 @@ def can_edit_class_lesson_registration(user, class_group, lesson):
 
 
 def can_edit_attendance_sheet(user, sheet):
-    if user.is_superuser:
-        return True
-
-    role_names = get_user_role_names(user)
-    if role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
-        return True
-
-    if ROLE_PROFESSOR in role_names:
-        return can_edit_class_lesson_registration(
-            user, sheet.class_group, sheet.lesson
-        )
-
-    return False
+    return can_edit_class_lesson_registration(
+        user,
+        sheet.class_group,
+        sheet.lesson,
+    )

@@ -1,19 +1,19 @@
+from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from access_control.constants import ADMIN_ROLES, SECRETARY_ROLES
 from attendance.models import AttendanceSheet
 from classrooms.models import ClassGroup
-from core.scoping import get_user_role_names
 from core.permissions import module_permission
 from core.viewmixins import OrganizationScopedViewMixin
 
 from .models import Lesson, Trimester
+from .querysets import with_attendance_totals
 from .serializers import LessonSerializer, TrimesterSerializer
-from .services import can_edit_lesson, can_manage_trimesters
+from .services import can_edit_lesson, can_manage_lessons, can_manage_trimesters
 
 
 class TrimesterViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
@@ -39,17 +39,19 @@ class TrimesterViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        if not can_manage_trimesters(self.request.user):
+        organization = self.get_active_organization()
+        if not can_manage_trimesters(self.request.user, organization):
             raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
-        serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
+        serializer.save(organization=organization, created_by=self.request.user)
 
     def perform_update(self, serializer):
-        if not can_manage_trimesters(self.request.user):
+        if not can_manage_trimesters(self.request.user, serializer.instance.organization):
             raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
         serializer.save(updated_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
-        if not can_manage_trimesters(request.user):
+        trimester = self.get_object()
+        if not can_manage_trimesters(request.user, trimester.organization):
             raise PermissionDenied('Apenas secretários podem gerenciar trimestres.')
         return super().destroy(request, *args, **kwargs)
 
@@ -92,7 +94,7 @@ class LessonViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
                 | Q(schedules__professor=self.request.user)
             ).distinct()
 
-        return queryset
+        return with_attendance_totals(queryset)
 
     def perform_create(self, serializer):
         serializer.save(organization=self.get_active_organization(), created_by=self.request.user)
@@ -120,8 +122,7 @@ class LessonViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         if lesson.status == 'FINALIZADA':
             return Response({'detail': 'Lição já finalizada.'}, status=status.HTTP_200_OK)
 
-        role_names = get_user_role_names(request.user)
-        if not request.user.is_superuser and not role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
+        if not can_manage_lessons(request.user, lesson.organization):
             raise PermissionDenied('Apenas secretários podem finalizar a lição.')
 
         active_classes = ClassGroup.objects.filter(
@@ -135,13 +136,15 @@ class LessonViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
                 lesson=lesson,
                 class_group=class_group,
             ).first()
-            if not sheet:
+            if not sheet or sheet.finalized_at is None:
                 pending.append(class_group.nome)
 
         if pending:
             raise ValidationError(
                 {
-                    'detail': 'Registre a EBD de todas as turmas ativas antes de encerrar a lição.',
+                    'detail': (
+                        'Conclua a chamada de todas as turmas ativas antes de encerrar a lição.'
+                    ),
                     'turmas_pendentes': pending,
                 }
             )

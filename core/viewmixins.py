@@ -1,4 +1,9 @@
-from core.scoping import get_org_child_ids, get_teaching_class_ids, is_campo_organization, user_is_professor
+from core.scoping import (
+    get_org_child_ids,
+    get_teaching_class_ids,
+    is_campo_organization,
+    is_somente_professor,
+)
 from core.tenant import get_operational_organization, get_user_organization
 
 
@@ -11,7 +16,7 @@ class OrganizationScopedViewMixin:
         return get_user_organization(self.request)
 
     def get_teaching_class_filter(self, organization):
-        if not user_is_professor(self.request.user, organization):
+        if not is_somente_professor(self.request.user, organization):
             return None
         class_ids = get_teaching_class_ids(self.request.user, organization)
         return class_ids

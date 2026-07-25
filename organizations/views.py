@@ -75,6 +75,8 @@ class OrganizationViewSet(viewsets.ModelViewSet):
                 'true',
                 'yes',
             )
+            if self.action == 'activate':
+                include_inactive = True
             instances_only = self.request.query_params.get('instances_only', 'true').lower() in (
                 '1',
                 'true',
@@ -197,6 +199,8 @@ class ChurchViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         campo = _resolve_campo_for_churches(self.request)
         include_inactive = self.request.query_params.get('include_inactive', '').lower() in ('1', 'true', 'yes')
+        if self.action == 'activate':
+            include_inactive = True
         return get_igrejas_do_campo(campo, include_inactive=include_inactive)
 
     def get_permissions(self):

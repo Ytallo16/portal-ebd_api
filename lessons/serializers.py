@@ -49,7 +49,11 @@ class LessonSerializer(serializers.ModelSerializer):
         read_only_fields = ['organization']
 
     def get_presentes(self, obj):
+        if hasattr(obj, 'total_presentes'):
+            return obj.total_presentes
         return AttendanceRecord.objects.filter(attendance_sheet__lesson=obj, presente=True).count()
 
     def get_ausentes(self, obj):
+        if hasattr(obj, 'total_ausentes'):
+            return obj.total_ausentes
         return AttendanceRecord.objects.filter(attendance_sheet__lesson=obj, presente=False).count()

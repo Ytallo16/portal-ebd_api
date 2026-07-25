@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    actions,
     attendance_evolution,
     birthdays,
     class_composition,
@@ -11,6 +12,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path('dashboard/actions', actions),
     path('dashboard/summary', summary),
     path('dashboard/attendance-evolution', attendance_evolution),
     path('dashboard/offering-evolution', offering_evolution),

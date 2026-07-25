@@ -1,6 +1,7 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.db.models import Count, Q, Sum
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -8,13 +9,14 @@ from rest_framework.response import Response
 from attendance.models import AttendanceRecord, AttendanceSheet
 from classrooms.models import ClassGroup
 from core.permissions import module_permission
-from core.scoping import get_teaching_class_ids, user_is_professor
+from core.scoping import get_teaching_class_ids, is_somente_professor
 from core.tenant import get_operational_organization, resolve_active_organization
 from core.viewmixins import DashboardOrganizationMixin
 from finance.models import Offering
 from students.models import Student
 
-from .services import build_professor_dashboard
+from .actions import build_dashboard_actions
+from .services import _birthday_for_year, build_professor_dashboard
 
 
 class DashboardRequestMixin(DashboardOrganizationMixin):
@@ -35,14 +37,18 @@ def _class_ids_for_dashboard(request):
     except Exception:
         return None
 
-    if active_org and user_is_professor(request.user, active_org):
+    if active_org and is_somente_professor(request.user, active_org):
         return get_teaching_class_ids(request.user, active_org)
     return None
 
 
 def _student_queryset(request):
     org_ids = _org_ids(request)
-    queryset = Student.objects.filter(organization_id__in=org_ids, is_active=True)
+    queryset = Student.objects.filter(
+        organization_id__in=org_ids,
+        ativo=True,
+        is_active=True,
+    )
     class_ids = _class_ids_for_dashboard(request)
     if class_ids is not None:
         queryset = queryset.filter(class_group_id__in=class_ids)
@@ -55,11 +61,25 @@ def summary(request):
     org_ids = _org_ids(request)
     class_ids = _class_ids_for_dashboard(request)
 
-    students = Student.objects.filter(organization_id__in=org_ids, is_active=True)
-    classes = ClassGroup.objects.filter(organization_id__in=org_ids, is_active=True)
+    students = Student.objects.filter(
+        organization_id__in=org_ids,
+        ativo=True,
+        is_active=True,
+    )
+    classes = ClassGroup.objects.filter(
+        organization_id__in=org_ids,
+        ativa=True,
+        is_active=True,
+    )
     offerings = Offering.objects.filter(organization_id__in=org_ids, is_active=True)
-    attendance = AttendanceRecord.objects.filter(attendance_sheet__lesson__organization_id__in=org_ids)
-    sheets = AttendanceSheet.objects.filter(lesson__organization_id__in=org_ids)
+    attendance = AttendanceRecord.objects.filter(
+        attendance_sheet__lesson__organization_id__in=org_ids,
+        attendance_sheet__finalized_at__isnull=False,
+    )
+    sheets = AttendanceSheet.objects.filter(
+        lesson__organization_id__in=org_ids,
+        finalized_at__isnull=False,
+    )
 
     if class_ids is not None:
         students = students.filter(class_group_id__in=class_ids)
@@ -89,7 +109,10 @@ def attendance_evolution(request):
     org_ids = _org_ids(request)
     class_ids = _class_ids_for_dashboard(request)
 
-    queryset = AttendanceRecord.objects.filter(attendance_sheet__lesson__organization_id__in=org_ids)
+    queryset = AttendanceRecord.objects.filter(
+        attendance_sheet__lesson__organization_id__in=org_ids,
+        attendance_sheet__finalized_at__isnull=False,
+    )
     if class_ids is not None:
         queryset = queryset.filter(attendance_sheet__class_group_id__in=class_ids)
 
@@ -133,12 +156,21 @@ def class_composition(request):
     org_ids = _org_ids(request)
     class_ids = _class_ids_for_dashboard(request)
 
-    queryset = ClassGroup.objects.filter(organization_id__in=org_ids, is_active=True)
+    queryset = ClassGroup.objects.filter(
+        organization_id__in=org_ids,
+        ativa=True,
+        is_active=True,
+    )
     if class_ids is not None:
         queryset = queryset.filter(id__in=class_ids)
 
     rows = (
-        queryset.annotate(total=Count('students', filter=Q(students__is_active=True)))
+        queryset.annotate(
+            total=Count(
+                'students',
+                filter=Q(students__ativo=True, students__is_active=True),
+            )
+        )
         .values('id', 'nome', 'cor', 'total')
         .order_by('nome')
     )
@@ -149,14 +181,20 @@ def class_composition(request):
 @permission_classes([IsAuthenticated, module_permission('dashboard', 'visualizar')])
 def birthdays(request):
     students = _student_queryset(request)
-    today = date.today()
+    today = timezone.localdate()
     future = today + timedelta(days=30)
 
     payload = []
     for student in students.select_related('class_group'):
-        current_year_birthday = student.data_nascimento.replace(year=today.year)
+        current_year_birthday = _birthday_for_year(
+            student.data_nascimento,
+            today.year,
+        )
         if current_year_birthday < today:
-            current_year_birthday = current_year_birthday.replace(year=today.year + 1)
+            current_year_birthday = _birthday_for_year(
+                student.data_nascimento,
+                today.year + 1,
+            )
         if today <= current_year_birthday <= future:
             payload.append(
                 {
@@ -178,6 +216,13 @@ def professor_dashboard(request):
     class_id = request.query_params.get('class_id')
     payload = build_professor_dashboard(request.user, org, class_id=class_id)
     return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, module_permission('dashboard', 'visualizar')])
+def actions(request):
+    active_org = resolve_active_organization(request, required=True)
+    return Response(build_dashboard_actions(request.user, active_org))
 
 
 @api_view(['GET'])
@@ -206,6 +251,8 @@ def professor_ranking(request):
         lesson__trimestre=trimestre,
         lesson__ano=ano,
         professor__isnull=False,
+        finalized_at__isnull=False,
+        class_group__ativa=True,
         class_group__is_active=True,
     )
     if class_ids is not None:
@@ -213,42 +260,54 @@ def professor_ranking(request):
     if class_id_param is not None:
         sheets = sheets.filter(class_group_id=class_id_param)
 
-    rows = (
-        sheets.values('professor_id', 'professor__nome')
-        .annotate(
-            presencas=Count('id', filter=Q(professor_presente=True)),
-            ausencias=Count('id', filter=Q(professor_presente=False)),
-            turma_ids=Count('class_group', distinct=True),
-        )
-        .order_by()
-    )
-
-    turma_rows = (
-        sheets.values('professor_id', 'class_group_id', 'class_group__nome')
-        .distinct()
-        .order_by('class_group__nome')
-    )
-    turma_map = {}
-    for row in turma_rows:
+    professor_rows = {}
+    professor_lesson_presence = {}
+    for row in sheets.values(
+        'professor_id',
+        'professor__nome',
+        'lesson_id',
+        'class_group_id',
+        'class_group__nome',
+        'professor_presente',
+    ):
         professor_id = row['professor_id']
-        turma_map.setdefault(professor_id, {'ids': [], 'nomes': []})
-        turma_map[professor_id]['ids'].append(str(row['class_group_id']))
-        turma_map[professor_id]['nomes'].append(row['class_group__nome'])
+        professor = professor_rows.setdefault(
+            professor_id,
+            {
+                'nome': row['professor__nome'],
+                'turmas': {},
+            },
+        )
+        professor['turmas'][row['class_group_id']] = row['class_group__nome']
+        pair = (professor_id, row['lesson_id'])
+        professor_lesson_presence[pair] = (
+            professor_lesson_presence.get(pair, False)
+            or row['professor_presente']
+        )
 
     payload = []
-    for row in rows:
-        total = row['presencas'] + row['ausencias']
-        turma_info = turma_map.get(row['professor_id'], {'ids': [], 'nomes': []})
+    for professor_id, professor in professor_rows.items():
+        lesson_presence = [
+            presente
+            for (row_professor_id, _), presente in professor_lesson_presence.items()
+            if row_professor_id == professor_id
+        ]
+        presencas = sum(lesson_presence)
+        ausencias = len(lesson_presence) - presencas
+        total = presencas + ausencias
+        turma_ids = sorted(professor['turmas'])
         payload.append(
             {
-                'professorId': row['professor_id'],
-                'professorNome': row['professor__nome'] or f"Professor #{row['professor_id']}",
-                'turmaIds': turma_info['ids'],
-                'turmaNomes': turma_info['nomes'],
-                'presencas': row['presencas'],
-                'ausencias': row['ausencias'],
+                'professorId': professor_id,
+                'professorNome': professor['nome'] or f'Professor #{professor_id}',
+                'turmaIds': [str(turma_id) for turma_id in turma_ids],
+                'turmaNomes': [
+                    professor['turmas'][turma_id] for turma_id in turma_ids
+                ],
+                'presencas': presencas,
+                'ausencias': ausencias,
                 'totalRegistros': total,
-                'presencaPct': (row['presencas'] / total) * 100 if total else 0,
+                'presencaPct': (presencas / total) * 100 if total else 0,
             }
         )
 

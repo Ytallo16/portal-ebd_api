@@ -201,3 +201,42 @@ class UserRoleUpdateApiTests(APITestCase):
         self.assertEqual(self.professor.email, 'novo@test.com')
         self.assertFalse(self.professor.is_active)
         self.assertEqual(self.papeis_ativos(self.professor), {ROLE_PROFESSOR})
+
+    def test_lista_usuarios_paginada_e_retorna_estatisticas_do_escopo(self):
+        for index in range(23):
+            user = User.objects.create_user(
+                email=f'prof{index}@test.com',
+                password='123456',
+                nome=f'Professor {index:02d}',
+                is_active=index != 0,
+            )
+            OrganizationMembership.objects.create(
+                user=user,
+                organization=self.igreja,
+                ativo=True,
+            )
+            UserRole.objects.create(
+                user=user,
+                role=self.role_professor,
+                organization=self.igreja,
+                ativo=True,
+            )
+
+        first_page = self.client.get('/api/v1/users/?page=1')
+        stats_response = self.client.get('/api/v1/users/stats/')
+
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data['count'], 25)
+        self.assertEqual(len(first_page.data['results']), 20)
+        self.assertIsNotNone(first_page.data['next'])
+        self.assertEqual(
+            stats_response.data,
+            {'total': 25, 'ativos': 24, 'inativos': 1},
+        )
+
+    def test_filtra_usuarios_por_papel_no_servidor(self):
+        response = self.client.get('/api/v1/users/?role=PROFESSOR')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data['results']
+        self.assertEqual([item['id'] for item in results], [self.professor.id])

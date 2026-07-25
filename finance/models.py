@@ -12,6 +12,17 @@ class Offering(AuditModel, OrganizationScopedModel, SoftDeleteModel):
 
     class Meta:
         ordering = ['-data']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'lesson', 'class_group'],
+                condition=models.Q(
+                    is_active=True,
+                    lesson__isnull=False,
+                    class_group__isnull=False,
+                ),
+                name='uniq_active_offering_lesson_class',
+            ),
+        ]
 
     def clean(self):
         if self.valor < 0:

@@ -108,6 +108,76 @@ class LessonScheduleApiTests(APITestCase):
             ).exists()
         )
 
+    def test_bulk_rejects_same_professor_in_two_classes_on_same_lesson(self):
+        turma_jovens = ClassGroup.objects.create(
+            organization=self.org,
+            nome='Jovens',
+            faixa_etaria='Jovens',
+            cor='#111',
+            ativa=True,
+        )
+        ClassTeacher.objects.create(
+            class_group=turma_jovens,
+            user=self.professor,
+        )
+
+        response = self.client.post(
+            '/api/v1/lesson-schedules/bulk/',
+            {
+                'lesson': self.lesson.id,
+                'assignments': [
+                    {'class_group': self.turma.id, 'professor': self.professor.id},
+                    {'class_group': turma_jovens.id, 'professor': self.professor.id},
+                ],
+            },
+            format='json',
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('assignments', response.data)
+        self.assertFalse(
+            LessonSchedule.objects.filter(lesson=self.lesson).exists()
+        )
+
+    def test_rejects_professor_already_scheduled_on_same_date(self):
+        turma_jovens = ClassGroup.objects.create(
+            organization=self.org,
+            nome='Jovens',
+            faixa_etaria='Jovens',
+            cor='#111',
+            ativa=True,
+        )
+        outra_licao = Lesson.objects.create(
+            organization=self.org,
+            numero=2,
+            tema='Outra lição no mesmo dia',
+            data=self.lesson.data,
+            revista='Jovens',
+            trimestre=1,
+            ano=2026,
+        )
+        LessonSchedule.objects.create(
+            organization=self.org,
+            lesson=self.lesson,
+            class_group=self.turma,
+            professor=self.professor,
+        )
+
+        response = self.client.post(
+            '/api/v1/lesson-schedules/',
+            {
+                'lesson': outra_licao.id,
+                'class_group': turma_jovens.id,
+                'professor': self.professor.id,
+            },
+            format='json',
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('professor', response.data)
+
     def test_professor_lists_own_schedules(self):
         LessonSchedule.objects.create(
             organization=self.org,

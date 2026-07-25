@@ -1,3 +1,4 @@
+from django.db.models import Prefetch
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -6,6 +7,7 @@ from rest_framework.response import Response
 from core.permissions import module_permission
 from core.scoping import get_org_descendant_ids, is_admin_sistema, is_campo_organization
 from core.tenant import get_user_organization, resolve_active_organization
+from access_control.models import UserRole
 from classrooms.models import ClassTeacher
 from organizations.models import Organization, OrganizationMembership
 
@@ -29,21 +31,44 @@ class UserViewSet(
     mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
-    search_fields = ['nome', 'email']
+    search_fields = ['nome', 'email', 'user_roles__role__nome']
 
     def get_queryset(self):
         org = resolve_active_organization(self.request, required=False)
         if org is None:
             # Sem contexto ativo (ex.: admin do sistema numa instalação nova).
             if is_admin_sistema(self.request.user):
-                return User.objects.all().order_by('nome')
-            return User.objects.none()
-        org_ids = get_org_descendant_ids(org) if is_campo_organization(org) else [org.id]
-        user_ids = OrganizationMembership.objects.filter(
-            organization_id__in=org_ids,
-            ativo=True,
-        ).values_list('user_id', flat=True)
-        return User.objects.filter(id__in=user_ids).order_by('nome')
+                queryset = User.objects.all().order_by('nome')
+            else:
+                return User.objects.none()
+        else:
+            org_ids = get_org_descendant_ids(org) if is_campo_organization(org) else [org.id]
+            user_ids = OrganizationMembership.objects.filter(
+                organization_id__in=org_ids,
+                ativo=True,
+            ).values_list('user_id', flat=True)
+            queryset = User.objects.filter(id__in=user_ids).order_by('nome')
+
+        role_name = self.request.query_params.get('role')
+        if role_name:
+            queryset = queryset.filter(
+                user_roles__ativo=True,
+                user_roles__role__nome=role_name.strip().upper(),
+            ).distinct()
+        return queryset.prefetch_related(
+            Prefetch(
+                'user_roles',
+                queryset=UserRole.objects.filter(ativo=True).select_related('role'),
+                to_attr='active_roles_prefetched',
+            ),
+            Prefetch(
+                'organization_memberships',
+                queryset=OrganizationMembership.objects.filter(ativo=True).select_related(
+                    'organization'
+                ),
+                to_attr='active_memberships_prefetched',
+            ),
+        )
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -53,7 +78,7 @@ class UserViewSet(
         return UserSerializer
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'stats']:
             permission_classes = [IsAuthenticated, module_permission('usuarios', 'visualizar')]
         elif self.action == 'create':
             permission_classes = [IsAuthenticated, module_permission('usuarios', 'criar')]
@@ -62,6 +87,17 @@ class UserViewSet(
         else:
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
+
+    @action(methods=['GET'], detail=False)
+    def stats(self, request):
+        queryset = self.get_queryset()
+        return Response(
+            {
+                'total': queryset.count(),
+                'ativos': queryset.filter(is_active=True).count(),
+                'inativos': queryset.filter(is_active=False).count(),
+            }
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

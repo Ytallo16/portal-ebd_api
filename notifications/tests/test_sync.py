@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -105,6 +106,7 @@ class NotificationSyncTests(APITestCase):
             lesson=self.lesson_done,
             class_group=self.turma,
             professor=self.prof,
+            finalized_at=timezone.now(),
         )
 
         PublicationControl.objects.create(
@@ -145,7 +147,7 @@ class NotificationSyncTests(APITestCase):
             ).exists()
         )
 
-    def test_sheet_created_removes_attendance_notification(self):
+    def test_completed_sheet_removes_attendance_notification(self):
         self._login('prof.notif@test.com')
         self.client.get('/api/v1/notifications/')
         dedupe = f'attendance:lesson:{self.lesson_pending.id}:class:{self.turma.id}'
@@ -157,10 +159,142 @@ class NotificationSyncTests(APITestCase):
             lesson=self.lesson_pending,
             class_group=self.turma,
             professor=self.prof,
+            finalized_at=timezone.now(),
         )
         self.client.get('/api/v1/notifications/')
         self.assertFalse(
             Notification.objects.filter(user=self.prof, dedupe_key=dedupe).exists()
+        )
+
+    def test_draft_sheet_keeps_attendance_notification(self):
+        self._login('prof.notif@test.com')
+        AttendanceSheet.objects.create(
+            lesson=self.lesson_pending,
+            class_group=self.turma,
+            professor=self.prof,
+            finalized_at=None,
+        )
+
+        response = self.client.get('/api/v1/notifications/')
+
+        dedupe = f'attendance:lesson:{self.lesson_pending.id}:class:{self.turma.id}'
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            Notification.objects.filter(user=self.prof, dedupe_key=dedupe).exists()
+        )
+
+    def test_future_lesson_is_not_an_attendance_pending_action(self):
+        future_lesson = Lesson.objects.create(
+            organization=self.org,
+            numero=3,
+            tema='Lição futura',
+            data=timezone.localdate() + timedelta(days=7),
+            revista='Revista',
+            trimestre=1,
+            ano=2026,
+        )
+        self._login('prof.notif@test.com')
+
+        self.client.get('/api/v1/notifications/')
+
+        dedupe = f'attendance:lesson:{future_lesson.id}:class:{self.turma.id}'
+        self.assertFalse(
+            Notification.objects.filter(user=self.prof, dedupe_key=dedupe).exists()
+        )
+
+    def test_inactive_class_does_not_create_professor_alerts(self):
+        inactive_class = ClassGroup.objects.create(
+            organization=self.org,
+            nome='Turma encerrada',
+            faixa_etaria='Adultos',
+            cor='#555',
+            ativa=False,
+            is_active=True,
+        )
+        ClassTeacher.objects.create(class_group=inactive_class, user=self.prof)
+        self._login('prof.notif@test.com')
+
+        self.client.get('/api/v1/notifications/')
+
+        self.assertFalse(
+            Notification.objects.filter(
+                user=self.prof,
+                dedupe_key=(
+                    f'attendance:lesson:{self.lesson_pending.id}:'
+                    f'class:{inactive_class.id}'
+                ),
+            ).exists()
+        )
+
+    def test_mixed_secretary_professor_receives_only_operational_queue(self):
+        UserRole.objects.create(
+            user=self.prof,
+            role=Role.objects.get(nome='SECRETARIO_IGREJA'),
+            organization=self.org,
+            ativo=True,
+        )
+        self._login('prof.notif@test.com')
+
+        self.client.get('/api/v1/notifications/')
+
+        self.assertFalse(
+            Notification.objects.filter(
+                user=self.prof,
+                dedupe_key=(
+                    f'attendance:lesson:{self.lesson_pending.id}:'
+                    f'class:{self.turma.id}'
+                ),
+            ).exists()
+        )
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.prof,
+                dedupe_key=(
+                    f'attendance_pending:lesson:{self.lesson_pending.id}'
+                ),
+            ).exists()
+        )
+
+    def test_secretary_action_changes_from_pending_to_ready_to_finalize(self):
+        self._login('sec.notif@test.com')
+
+        pending_response = self.client.get('/api/v1/notifications/')
+        pending_items = [
+            item
+            for item in pending_response.data['results']
+            if item['metadata'].get('lesson_id') == self.lesson_pending.id
+        ]
+
+        self.assertEqual(len(pending_items), 1)
+        self.assertEqual(pending_items[0]['kind'], 'ATTENDANCE_PENDING')
+        self.assertEqual(
+            pending_items[0]['metadata']['turmas_pendentes'],
+            [self.turma.nome],
+        )
+
+        AttendanceSheet.objects.create(
+            lesson=self.lesson_pending,
+            class_group=self.turma,
+            professor=self.prof,
+            finalized_at=timezone.now(),
+        )
+        ready_response = self.client.get('/api/v1/notifications/')
+        ready_items = [
+            item
+            for item in ready_response.data['results']
+            if item['metadata'].get('lesson_id') == self.lesson_pending.id
+        ]
+
+        self.assertEqual(len(ready_items), 1)
+        self.assertEqual(ready_items[0]['kind'], 'LESSON_FINALIZE')
+        self.assertEqual(ready_items[0]['metadata']['turmas_pendentes'], [])
+        self.assertFalse(
+            Notification.objects.filter(
+                user=self.secretario,
+                dedupe_key=(
+                    f'attendance_pending:lesson:{self.lesson_pending.id}'
+                ),
+            ).exists()
         )
 
     def test_read_preserves_on_resync(self):

@@ -96,13 +96,13 @@ def get_user_role_names(user):
     }
 
 
-def get_creatable_user_roles(user):
+def get_creatable_user_roles(user, organization=None):
     from access_control.constants import CANONICAL_ROLES
 
     if is_admin_sistema(user):
         return set(CANONICAL_ROLES)
 
-    role_names = get_user_role_names(user)
+    role_names = get_role_names_for_organization(user, organization)
     if ROLE_SECRETARIO_CAMPO in role_names:
         return {ROLE_SECRETARIO_CAMPO, ROLE_SECRETARIO_IGREJA, ROLE_PROFESSOR}
     if ROLE_SECRETARIO_IGREJA in role_names:
@@ -202,6 +202,18 @@ def get_roles_for_active_org(user, active_org):
     return applicable
 
 
+def get_role_names_for_organization(user, organization):
+    """Papéis efetivos no contexto informado, incluindo herança do secretário de campo."""
+    if is_admin_sistema(user):
+        return {ROLE_ADMINISTRADOR}
+    if organization is None:
+        return set()
+    return {
+        user_role.role.nome.upper()
+        for user_role in get_roles_for_active_org(user, organization)
+    }
+
+
 def user_is_professor(user, organization=None):
     roles = get_active_user_roles(user).filter(role__nome=ROLE_PROFESSOR)
     if organization is not None:
@@ -223,6 +235,7 @@ def get_teaching_class_ids(user, organization):
         ClassTeacher.objects.filter(
             user=user,
             class_group__organization=organization,
+            class_group__ativa=True,
             class_group__is_active=True,
         ).values_list('class_group_id', flat=True)
     )

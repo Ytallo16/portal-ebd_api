@@ -5,6 +5,14 @@ from core.scoping import get_roles_for_active_org, is_admin_sistema
 from core.tenant import resolve_active_organization
 
 
+class IsAdminSistema(BasePermission):
+    message = 'Apenas administradores do sistema podem realizar esta operação.'
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and is_admin_sistema(user))
+
+
 class HasModulePermission(BasePermission):
     module = None
     action = None

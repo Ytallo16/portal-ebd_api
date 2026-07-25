@@ -7,7 +7,12 @@ from rest_framework.test import APITestCase
 from access_control.models import ModulePermission, Role, RolePermission, UserRole
 from accounts.models import User
 from classrooms.models import ClassGroup, ClassTeacher
-from core.scoping import can_access_organization, get_accessible_organization_ids, get_org_descendant_ids
+from core.scoping import (
+    can_access_organization,
+    get_accessible_organization_ids,
+    get_org_descendant_ids,
+    get_teaching_class_ids,
+)
 from lessons.models import Lesson
 from organizations.constants import FORMATO_CAMPO, TIPO_CAMPO, TIPO_IGREJA
 from organizations.models import Organization, OrganizationMembership
@@ -206,3 +211,16 @@ class ProfessorScopeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['nome'], 'Aluno Turma A')
+
+    def test_inactive_business_class_is_not_a_teaching_class(self):
+        ClassTeacher.objects.create(
+            class_group=self.turma_b,
+            user=self.professor,
+        )
+        self.turma_b.ativa = False
+        self.turma_b.save(update_fields=['ativa', 'updated_at'])
+
+        self.assertEqual(
+            get_teaching_class_ids(self.professor, self.igreja),
+            [self.turma_a.id],
+        )

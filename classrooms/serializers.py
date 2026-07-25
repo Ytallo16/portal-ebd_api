@@ -24,25 +24,6 @@ class ClassTeacherSerializer(serializers.ModelSerializer):
             if exists.exists():
                 raise serializers.ValidationError({'user': 'Este professor já está vinculado à turma.'})
 
-            outra_turma = (
-                ClassTeacher.objects.filter(
-                    user=user,
-                    class_group__organization=class_group.organization,
-                )
-                .exclude(class_group=class_group)
-                .select_related('class_group')
-                .first()
-            )
-            if outra_turma:
-                raise serializers.ValidationError(
-                    {
-                        'user': (
-                            f'Este professor já leciona na turma {outra_turma.class_group.nome}. '
-                            'Cada usuário só pode ser professor de uma turma.'
-                        )
-                    }
-                )
-
             is_professor = UserRole.objects.filter(
                 user=user,
                 ativo=True,

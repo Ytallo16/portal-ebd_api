@@ -56,6 +56,9 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'nome', 'email', 'is_active', 'date_joined', 'papeis', 'organizacoes']
 
     def get_papeis(self, obj):
+        prefetched = getattr(obj, 'active_roles_prefetched', None)
+        if prefetched is not None:
+            return [user_role.role.nome for user_role in prefetched]
         return list(
             UserRole.objects.filter(user=obj, ativo=True)
             .select_related('role')
@@ -63,6 +66,15 @@ class UserSerializer(serializers.ModelSerializer):
         )
 
     def get_organizacoes(self, obj):
+        prefetched = getattr(obj, 'active_memberships_prefetched', None)
+        if prefetched is not None:
+            return [
+                {
+                    'organization_id': membership.organization_id,
+                    'organization__nome': membership.organization.nome,
+                }
+                for membership in prefetched
+            ]
         return list(
             OrganizationMembership.objects.filter(user=obj, ativo=True)
             .select_related('organization')
@@ -83,7 +95,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
         if request and value == ROLE_ADMINISTRADOR and not is_admin_sistema(request.user):
             raise serializers.ValidationError('Sem permissão para criar administrador do sistema.')
         if request and not is_admin_sistema(request.user):
-            allowed_roles = get_creatable_user_roles(request.user)
+            organization = resolve_active_organization(request, required=False)
+            allowed_roles = get_creatable_user_roles(request.user, organization)
             if value not in allowed_roles:
                 raise serializers.ValidationError('Sem permissão para criar este perfil.')
         return value
@@ -182,8 +195,10 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Você não pode alterar o seu próprio perfil de acesso.')
         if value == ROLE_ADMINISTRADOR and not is_admin_sistema(request.user):
             raise serializers.ValidationError('Sem permissão para conceder o perfil de administrador do sistema.')
-        if not is_admin_sistema(request.user) and value not in get_creatable_user_roles(request.user):
-            raise serializers.ValidationError('Sem permissão para conceder este perfil.')
+        if not is_admin_sistema(request.user):
+            organization = resolve_active_organization(request, required=False)
+            if value not in get_creatable_user_roles(request.user, organization):
+                raise serializers.ValidationError('Sem permissão para conceder este perfil.')
         return value
 
     def validate(self, attrs):
@@ -242,12 +257,20 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             defaults={'ativo': True},
         )
 
+        # A instância veio do queryset paginado com `to_attr`; após trocar o
+        # papel, essa lista ainda contém o perfil antigo e contaminaria a
+        # representação devolvida pelo PATCH.
+        if hasattr(user, 'active_roles_prefetched'):
+            delattr(user, 'active_roles_prefetched')
+
         if role_org is not None:
             OrganizationMembership.objects.update_or_create(
                 user=user,
                 organization=role_org,
                 defaults={'ativo': True, 'role_scope': papel.lower()},
             )
+            if hasattr(user, 'active_memberships_prefetched'):
+                delattr(user, 'active_memberships_prefetched')
 
         deve_ser_staff = papel in (ROLE_SECRETARIO_CAMPO, ROLE_SECRETARIO_IGREJA)
         if deve_ser_staff and not user.is_staff:

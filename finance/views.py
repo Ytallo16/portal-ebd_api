@@ -19,6 +19,11 @@ class OfferingViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
     search_fields = ['class_group__nome', 'lesson__tema']
     use_operational_organization = True
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['organization'] = self.get_active_organization()
+        return context
+
     def get_queryset(self):
         org = self.get_active_organization()
         queryset = Offering.objects.filter(organization=org, is_active=True).select_related('lesson', 'class_group')

@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from django.db.models import Count, Q, Sum
+from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from attendance.models import AttendanceRecord, AttendanceSheet
@@ -15,6 +16,14 @@ def _pct(presentes, ausentes):
     if total == 0:
         return 0
     return round((presentes / total) * 100)
+
+
+def _birthday_for_year(birth_date, year):
+    try:
+        return birth_date.replace(year=year)
+    except ValueError:
+        # Regra de negócio para nascidos em 29/02 durante anos não bissextos.
+        return date(year, 2, 28)
 
 
 def _trimestre_referencia(org):
@@ -46,7 +55,7 @@ def _find_proxima_licao(lessons, sheet_lesson_ids):
     if not lessons:
         return None
 
-    today = date.today()
+    today = timezone.localdate()
     ranked = sorted(
         lessons,
         key=lambda lesson: abs((lesson.data - today).days),
@@ -64,14 +73,20 @@ def _find_proxima_licao(lessons, sheet_lesson_ids):
 
 
 def _build_aniversariantes(students_qs, today=None, horizon_days=30):
-    today = today or date.today()
+    today = today or timezone.localdate()
     future = today + timedelta(days=horizon_days)
     payload = []
 
     for student in students_qs:
-        current_year_birthday = student.data_nascimento.replace(year=today.year)
+        current_year_birthday = _birthday_for_year(
+            student.data_nascimento,
+            today.year,
+        )
         if current_year_birthday < today:
-            current_year_birthday = current_year_birthday.replace(year=today.year + 1)
+            current_year_birthday = _birthday_for_year(
+                student.data_nascimento,
+                today.year + 1,
+            )
         if today <= current_year_birthday <= future:
             payload.append(
                 {
@@ -106,8 +121,8 @@ def _build_evolucao_frequencia(sheets, limit=12):
     ordered = sorted(sheets, key=lambda sheet: sheet.lesson.data)[-limit:]
     payload = []
     for sheet in ordered:
-        presentes = sheet.records.filter(presente=True).count()
-        ausentes = sheet.records.filter(presente=False).count()
+        presentes = sheet.presentes_count
+        ausentes = sheet.ausentes_count
         payload.append(
             {
                 'data': sheet.lesson.data,
@@ -118,6 +133,46 @@ def _build_evolucao_frequencia(sheets, limit=12):
             }
         )
     return payload
+
+
+def _build_licoes_hoje(org, turmas, today=None):
+    today = today or timezone.localdate()
+    turmas = list(turmas)
+    if not turmas:
+        return []
+
+    lessons = list(
+        Lesson.objects.filter(
+            organization=org,
+            data=today,
+            is_active=True,
+        ).order_by('numero')
+    )
+    if not lessons:
+        return []
+
+    registered_pairs = set(
+        AttendanceSheet.objects.filter(
+            class_group_id__in=[turma['id'] for turma in turmas],
+            lesson__in=lessons,
+            finalized_at__isnull=False,
+        ).values_list('lesson_id', 'class_group_id')
+    )
+    return [
+        {
+            'id': lesson.id,
+            'numero': lesson.numero,
+            'tema': lesson.tema,
+            'data': lesson.data,
+            'trimestre': lesson.trimestre,
+            'ano': lesson.ano,
+            'turma_id': turma['id'],
+            'turma_nome': turma['nome'],
+            'registrada': (lesson.id, turma['id']) in registered_pairs,
+        }
+        for lesson in lessons
+        for turma in turmas
+    ]
 
 
 def require_professor_classes(user, org):
@@ -135,6 +190,7 @@ def resolve_class_group(org, class_ids, class_id=None):
     turmas = ClassGroup.objects.filter(
         organization=org,
         id__in=class_ids,
+        ativa=True,
         is_active=True,
     ).order_by('nome')
 
@@ -161,6 +217,7 @@ def build_professor_dashboard(user, org, class_id=None):
     class_ids = require_professor_classes(user, org)
     turma, turmas_disponiveis = resolve_class_group(org, class_ids, class_id)
     trimestre = _trimestre_referencia(org)
+    today = timezone.localdate()
 
     trimestre_payload = None
     lessons = Lesson.objects.none()
@@ -183,19 +240,30 @@ def build_professor_dashboard(user, org, class_id=None):
             AttendanceSheet.objects.filter(
                 class_group=turma,
                 lesson__in=lessons,
+                finalized_at__isnull=False,
             )
             .select_related('lesson')
-            .prefetch_related('records')
+            .annotate(
+                presentes_count=Count('records', filter=Q(records__presente=True)),
+                ausentes_count=Count('records', filter=Q(records__presente=False)),
+            )
         )
         records = AttendanceRecord.objects.filter(attendance_sheet__in=sheets)
 
     sheet_lesson_ids = set(sheets.values_list('lesson_id', flat=True))
-    lesson_ids = set(lessons.values_list('id', flat=True))
-    pending_lessons = lessons.exclude(id__in=sheet_lesson_ids).order_by('data', 'numero')
+    due_lesson_ids = set(
+        lessons.filter(data__lte=today).values_list('id', flat=True)
+    )
+    pending_lessons = (
+        lessons.filter(data__lte=today)
+        .exclude(id__in=sheet_lesson_ids)
+        .order_by('data', 'numero')
+    )
 
     total_alunos = Student.objects.filter(
         organization=org,
         class_group=turma,
+        ativo=True,
         is_active=True,
     ).count()
 
@@ -209,8 +277,8 @@ def build_professor_dashboard(user, org, class_id=None):
     ultimo_registro = None
     ultima_ebd_pct = None
     if ultimo_sheet:
-        ult_presentes = ultimo_sheet.records.filter(presente=True).count()
-        ult_ausentes = ultimo_sheet.records.filter(presente=False).count()
+        ult_presentes = ultimo_sheet.presentes_count
+        ult_ausentes = ultimo_sheet.ausentes_count
         ultima_ebd_pct = _pct(ult_presentes, ult_ausentes)
         ultimo_registro = {
             'licao_numero': ultimo_sheet.lesson.numero,
@@ -239,8 +307,8 @@ def build_professor_dashboard(user, org, class_id=None):
     aulas_escaladas = []
     for schedule in scheduled_qs:
         sheet = sheets_by_lesson.get(schedule.lesson_id)
-        presentes = sheet.records.filter(presente=True).count() if sheet else 0
-        ausentes = sheet.records.filter(presente=False).count() if sheet else 0
+        presentes = sheet.presentes_count if sheet else 0
+        ausentes = sheet.ausentes_count if sheet else 0
         aulas_escaladas.append(
             {
                 'id': schedule.lesson.id,
@@ -266,6 +334,7 @@ def build_professor_dashboard(user, org, class_id=None):
     students_qs = Student.objects.filter(
         organization=org,
         class_group=turma,
+        ativo=True,
         is_active=True,
     )
 
@@ -280,13 +349,14 @@ def build_professor_dashboard(user, org, class_id=None):
         'trimestre': trimestre_payload,
         'resumo': {
             'frequencia_media_pct': _pct(presentes_total, ausentes_total),
-            'pendencias_registro': len(lesson_ids - sheet_lesson_ids),
+            'pendencias_registro': len(due_lesson_ids - sheet_lesson_ids),
             'ultima_ebd_pct': ultima_ebd_pct,
             'ofertas_trimestre': str(ofertas_trimestre),
             'visitantes_trimestre': visitantes_trimestre or 0,
         },
         'proxima_licao': proxima_licao,
         'ultimo_registro': ultimo_registro,
+        'licoes_hoje': _build_licoes_hoje(org, turmas_disponiveis, today=today),
         'aulas_escaladas': aulas_escaladas,
         'licoes_pendentes': licoes_pendentes,
         'evolucao_frequencia': _build_evolucao_frequencia(list(sheets)),

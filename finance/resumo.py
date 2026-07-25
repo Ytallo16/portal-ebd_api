@@ -9,7 +9,7 @@ from rest_framework.response import Response
 
 from classrooms.models import ClassGroup
 from core.permissions import module_permission
-from core.scoping import get_teaching_class_ids, is_campo_organization, user_is_professor
+from core.scoping import get_teaching_class_ids, is_campo_organization, is_somente_professor
 from core.tenant import get_user_organization, resolve_active_organization
 from core.viewmixins import DashboardOrganizationMixin
 from finance.models import Offering
@@ -33,7 +33,7 @@ def _class_ids_filter(request):
         active_org = resolve_active_organization(request, required=False)
     except Exception:
         return None
-    if active_org and user_is_professor(request.user, active_org):
+    if active_org and is_somente_professor(request.user, active_org):
         return get_teaching_class_ids(request.user, active_org)
     return None
 

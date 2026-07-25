@@ -5,6 +5,9 @@ from core.models import AuditModel
 
 
 class AttendanceSheet(AuditModel):
+    STATUS_RASCUNHO = 'RASCUNHO'
+    STATUS_CONCLUIDA = 'CONCLUIDA'
+
     lesson = models.ForeignKey('lessons.Lesson', on_delete=models.CASCADE, related_name='attendance_sheets')
     class_group = models.ForeignKey('classrooms.ClassGroup', on_delete=models.CASCADE, related_name='attendance_sheets')
     professor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
@@ -17,6 +20,10 @@ class AttendanceSheet(AuditModel):
 
     class Meta:
         unique_together = ('lesson', 'class_group')
+
+    @property
+    def status(self):
+        return self.STATUS_CONCLUIDA if self.finalized_at else self.STATUS_RASCUNHO
 
 
 class AttendanceRecord(AuditModel):

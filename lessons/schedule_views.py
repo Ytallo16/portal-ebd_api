@@ -1,12 +1,11 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from access_control.constants import ADMIN_ROLES, SECRETARY_ROLES
 from core.permissions import module_permission
-from core.scoping import get_user_role_names, user_is_professor
+from core.scoping import is_somente_professor
 from core.viewmixins import OrganizationScopedViewMixin
 
 from .models import LessonSchedule
@@ -14,6 +13,7 @@ from .schedule_serializers import (
     LessonScheduleBulkSerializer,
     LessonScheduleSerializer,
 )
+from .services import can_manage_lessons
 
 
 class LessonScheduleViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
@@ -45,7 +45,7 @@ class LessonScheduleViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         if ano:
             queryset = queryset.filter(lesson__ano=ano)
 
-        if user_is_professor(self.request.user, org):
+        if is_somente_professor(self.request.user, org):
             queryset = queryset.filter(professor=self.request.user)
 
         return queryset
@@ -63,31 +63,49 @@ class LessonScheduleViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
             perms = [IsAuthenticated, module_permission('licoes', 'editar')]
         return [perm() for perm in perms]
 
-    def _ensure_secretary(self):
-        role_names = get_user_role_names(self.request.user)
-        if not self.request.user.is_superuser and not role_names.intersection(ADMIN_ROLES | SECRETARY_ROLES):
+    def _ensure_secretary(self, organization):
+        if not can_manage_lessons(self.request.user, organization):
             raise PermissionDenied('Apenas secretários podem gerenciar a escala de professores.')
 
+    def _ensure_schedule_scope(self, serializer, organization):
+        lesson = serializer.validated_data.get('lesson') or getattr(
+            serializer.instance,
+            'lesson',
+            None,
+        )
+        class_group = serializer.validated_data.get('class_group') or getattr(
+            serializer.instance,
+            'class_group',
+            None,
+        )
+        if lesson and lesson.organization_id != organization.id:
+            raise ValidationError({'lesson': 'Lição inválida para esta igreja.'})
+        if class_group and class_group.organization_id != organization.id:
+            raise ValidationError({'class_group': 'Turma inválida para esta igreja.'})
+
     def perform_create(self, serializer):
-        self._ensure_secretary()
-        lesson = serializer.validated_data['lesson']
+        organization = self.get_active_organization()
+        self._ensure_secretary(organization)
+        self._ensure_schedule_scope(serializer, organization)
         serializer.save(
-            organization=lesson.organization,
+            organization=organization,
             created_by=self.request.user,
             updated_by=self.request.user,
         )
 
     def perform_update(self, serializer):
-        self._ensure_secretary()
-        serializer.save(updated_by=self.request.user)
+        organization = self.get_active_organization()
+        self._ensure_secretary(organization)
+        self._ensure_schedule_scope(serializer, organization)
+        serializer.save(organization=organization, updated_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
-        self._ensure_secretary()
+        self._ensure_secretary(self.get_active_organization())
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['POST'], url_path='bulk')
     def bulk(self, request):
-        self._ensure_secretary()
+        self._ensure_secretary(self.get_active_organization())
         serializer = LessonScheduleBulkSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         schedules = serializer.save()

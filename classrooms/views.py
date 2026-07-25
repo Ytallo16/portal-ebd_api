@@ -1,4 +1,4 @@
-from django.db.models import Count
+from django.db.models import Count, Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -8,6 +8,7 @@ from core.permissions import module_permission
 from core.scoping import is_somente_professor
 from core.viewmixins import OrganizationScopedViewMixin
 from lessons.models import Lesson
+from lessons.querysets import with_attendance_totals
 from lessons.serializers import LessonSerializer
 
 from .models import ClassGroup, ClassTeacher
@@ -23,7 +24,13 @@ class ClassGroupViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         organization = self.get_active_organization()
         queryset = (
             ClassGroup.objects.filter(organization=organization, is_active=True)
-            .annotate(total_alunos=Count('students', distinct=True))
+            .annotate(
+                total_alunos=Count(
+                    'students',
+                    filter=Q(students__is_active=True, students__ativo=True),
+                    distinct=True,
+                )
+            )
             .order_by('nome')
         )
         class_ids = self.get_teaching_class_filter(organization)
@@ -64,13 +71,19 @@ class ClassGroupViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet):
         trimester = request.query_params.get('trimestre')
         year = request.query_params.get('ano')
 
-        queryset = Lesson.objects.filter(organization=class_group.organization)
+        queryset = Lesson.objects.filter(
+            organization=class_group.organization,
+            is_active=True,
+        )
         if trimester:
             queryset = queryset.filter(trimestre=trimester)
         if year:
             queryset = queryset.filter(ano=year)
 
-        serializer = LessonSerializer(queryset.order_by('data'), many=True)
+        serializer = LessonSerializer(
+            with_attendance_totals(queryset).order_by('data'),
+            many=True,
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 

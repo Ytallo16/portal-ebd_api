@@ -12,9 +12,48 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: portal_ebd_test
+          POSTGRES_USER: portal_ebd
+          POSTGRES_PASSWORD: portal_ebd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portal_ebd -d portal_ebd_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
+      POSTGRES_DB: portal_ebd_test
+      POSTGRES_USER: portal_ebd
+      POSTGRES_PASSWORD: portal_ebd
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Validar configuração e migrações
+        run: |
+          python manage.py check
+          python manage.py makemigrations --check --dry-run
+
+      - name: Executar testes
+        run: python manage.py test
 
       - name: Configurar chave SSH
         run: |

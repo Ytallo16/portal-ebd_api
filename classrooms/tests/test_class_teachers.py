@@ -118,7 +118,7 @@ class ClassTeacherApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(ClassTeacher.objects.filter(class_group=self.turma).count(), 2)
 
-    def test_nao_permite_professor_em_duas_turmas(self):
+    def test_permite_professor_em_duas_turmas(self):
         turma_b = ClassGroup.objects.create(
             organization=self.igreja,
             nome='Jovens',
@@ -132,8 +132,11 @@ class ClassTeacherApiTests(APITestCase):
             {'class_group': turma_b.id, 'user': self.professor_a.id},
             format='json',
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('user', response.data)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            ClassTeacher.objects.filter(user=self.professor_a).count(),
+            2,
+        )
 
 
 class ClassTeacherValidationTests(TestCase):
@@ -169,7 +172,7 @@ class ClassTeacherValidationTests(TestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn('user', serializer.errors)
 
-    def test_nao_vincula_professor_ja_em_outra_turma(self):
+    def test_vincula_professor_ja_em_outra_turma(self):
         from classrooms.models import ClassGroup
         from classrooms.serializers import ClassTeacherSerializer
 
@@ -185,10 +188,16 @@ class ClassTeacherValidationTests(TestCase):
             password='123456',
             nome='Professor Duplo',
         )
+        role_professor = Role.objects.create(nome='PROFESSOR')
+        UserRole.objects.create(
+            user=professor,
+            role=role_professor,
+            organization=self.igreja,
+            ativo=True,
+        )
         ClassTeacher.objects.create(class_group=turma_outra, user=professor)
 
         serializer = ClassTeacherSerializer(
             data={'class_group': self.turma.id, 'user': professor.id},
         )
-        self.assertFalse(serializer.is_valid())
-        self.assertIn('user', serializer.errors)
+        self.assertTrue(serializer.is_valid(), serializer.errors)

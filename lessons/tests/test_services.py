@@ -32,30 +32,53 @@ class LessonPermissionServiceTests(TestCase):
         professor = self._build_user_with_role('prof@test.com', 'PROFESSOR')
 
         class LessonStub:
-            def __init__(self, lesson_date):
+            def __init__(self, lesson_date, organization):
                 self.data = lesson_date
+                self.organization = organization
 
-        self.assertTrue(can_edit_lesson(professor, LessonStub(date.today())))
-        self.assertFalse(can_edit_lesson(professor, LessonStub(date.today() - timedelta(days=1))))
+        self.assertTrue(can_edit_lesson(professor, LessonStub(date.today(), self.org)))
+        self.assertFalse(
+            can_edit_lesson(
+                professor,
+                LessonStub(date.today() - timedelta(days=1), self.org),
+            )
+        )
 
     def test_admin_can_always_edit(self):
         admin = self._build_user_with_role('admin2@test.com', 'ADMINISTRADOR')
 
         class LessonStub:
-            def __init__(self, lesson_date):
+            def __init__(self, lesson_date, organization):
                 self.data = lesson_date
+                self.organization = organization
 
-        self.assertTrue(can_edit_lesson(admin, LessonStub(date.today() - timedelta(days=10))))
-        self.assertTrue(can_edit_lesson(admin, LessonStub(date.today() + timedelta(days=5))))
+        self.assertTrue(
+            can_edit_lesson(
+                admin,
+                LessonStub(date.today() - timedelta(days=10), self.org),
+            )
+        )
+        self.assertTrue(
+            can_edit_lesson(
+                admin,
+                LessonStub(date.today() + timedelta(days=5), self.org),
+            )
+        )
 
     def test_secretario_igreja_can_always_edit(self):
         secretario = self._build_user_with_role('sec@test.com', 'SECRETARIO_IGREJA')
 
         class LessonStub:
-            def __init__(self, lesson_date):
+            def __init__(self, lesson_date, organization):
                 self.data = lesson_date
+                self.organization = organization
 
-        self.assertTrue(can_edit_lesson(secretario, LessonStub(date.today() - timedelta(days=10))))
+        self.assertTrue(
+            can_edit_lesson(
+                secretario,
+                LessonStub(date.today() - timedelta(days=10), self.org),
+            )
+        )
 
     def test_professor_can_register_ebd_any_lesson_date(self):
         professor = self._build_user_with_role('prof2@test.com', 'PROFESSOR')

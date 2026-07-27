@@ -25,6 +25,7 @@ urlpatterns = [
     path('api/v1/', include('publications.urls')),
     path('api/v1/', include('dashboard.urls')),
     path('api/v1/', include('notifications.urls')),
+    path('api/v1/', include('activity_logs.urls')),
 ]
 
 if settings.DEBUG:

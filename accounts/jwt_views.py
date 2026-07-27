@@ -1,7 +1,11 @@
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import AccessToken
 
+from activity_logs.services import record_activity
+
+from .models import User
 from .authentication import cookie_settings
 
 
@@ -17,6 +21,19 @@ class CookieTokenObtainPairView(TokenObtainPairView):
             response.set_cookie('access_token', access, **cookie_settings())
         if refresh:
             response.set_cookie('refresh_token', refresh, **cookie_settings())
+        if access:
+            user_id = AccessToken(access).get('user_id')
+            user = User.objects.select_related('active_organization').filter(id=user_id).first()
+            if user:
+                record_activity(
+                    request=request,
+                    user=user,
+                    organization=user.active_organization,
+                    action='Iniciou a sessão',
+                    resource='Conta',
+                    event_type='LOGIN',
+                    status_code=response.status_code,
+                )
         return response
 
 

@@ -16,11 +16,16 @@ from lessons.models import Lesson, LessonSchedule
 from lessons.services import can_edit_attendance_sheet
 
 from .models import AttendanceRecord, AttendanceSheet
-from .services import save_attendance_registration, sync_offering_from_attendance_sheet
+from .services import (
+    save_attendance_registration,
+    save_teacher_presences,
+    sync_offering_from_attendance_sheet,
+)
 from .serializers import (
     AttendanceBulkUpsertSerializer,
     AttendanceRegistrationSerializer,
     AttendanceSheetSerializer,
+    AttendanceTeacherBulkUpsertSerializer,
     validate_professor_for_class,
 )
 
@@ -38,10 +43,27 @@ class AttendanceSheetViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet)
             'lesson',
             'class_group',
             'professor',
-        ).prefetch_related('records__student')
+        ).prefetch_related('records__student', 'teachers__user')
         class_ids = self.get_teaching_class_filter(org)
         if class_ids is not None:
             queryset = queryset.filter(class_group_id__in=class_ids)
+
+        # Permite à tela de frequência carregar só as fichas da lição aberta,
+        # em vez de depender da primeira página de todas as fichas da igreja.
+        lesson_id = self.request.query_params.get('lesson')
+        if lesson_id:
+            try:
+                queryset = queryset.filter(lesson_id=int(lesson_id))
+            except (TypeError, ValueError):
+                queryset = queryset.none()
+
+        class_group_id = self.request.query_params.get('class_group')
+        if class_group_id:
+            try:
+                queryset = queryset.filter(class_group_id=int(class_group_id))
+            except (TypeError, ValueError):
+                queryset = queryset.none()
+
         return queryset
 
     def get_permissions(self):
@@ -49,7 +71,7 @@ class AttendanceSheetViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet)
             perms = [IsAuthenticated, module_permission('frequencia', 'visualizar')]
         elif self.action == 'create':
             perms = [IsAuthenticated, module_permission('frequencia', 'criar')]
-        elif self.action in ['partial_update', 'update', 'records']:
+        elif self.action in ['partial_update', 'update', 'records', 'teachers']:
             perms = [IsAuthenticated, module_permission('frequencia', 'editar')]
         else:
             perms = [IsAuthenticated, module_permission('frequencia', 'excluir')]
@@ -146,6 +168,42 @@ class AttendanceSheetViewSet(OrganizationScopedViewMixin, viewsets.ModelViewSet)
             .get(pk=sheet.pk)
         )
         sync_offering_from_attendance_sheet(sheet)
+        return Response(AttendanceSheetSerializer(sheet).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['POST'], url_path='teachers')
+    @transaction.atomic
+    def teachers(self, request, pk=None):
+        """Salva em lote a frequência dos professores da turma nesta lição."""
+        sheet = self.get_object()
+
+        if not can_edit_attendance_sheet(request.user, sheet):
+            raise PermissionDenied('Você não pode editar este registro da EBD.')
+
+        serializer = AttendanceTeacherBulkUpsertSerializer(
+            data=request.data,
+            context={
+                'request': request,
+                'lesson': sheet.lesson,
+                'class_group': sheet.class_group,
+            },
+        )
+        serializer.is_valid(raise_exception=True)
+
+        save_teacher_presences(
+            sheet=sheet,
+            teachers=serializer.validated_data['teachers'],
+            user=request.user,
+        )
+
+        sheet = (
+            AttendanceSheet.objects.select_related(
+                'lesson',
+                'class_group__organization',
+                'professor',
+            )
+            .prefetch_related('records__student', 'teachers__user')
+            .get(pk=sheet.pk)
+        )
         return Response(AttendanceSheetSerializer(sheet).data, status=status.HTTP_200_OK)
 
 

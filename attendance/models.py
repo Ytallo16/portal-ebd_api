@@ -20,10 +20,38 @@ class AttendanceSheet(AuditModel):
 
     class Meta:
         unique_together = ('lesson', 'class_group')
+        # Sem ordenação explícita a paginação do DRF repete/perde fichas
+        # entre páginas.
+        ordering = ['lesson__numero', 'class_group__nome', 'id']
 
     @property
     def status(self):
         return self.STATUS_CONCLUIDA if self.finalized_at else self.STATUS_RASCUNHO
+
+
+class AttendanceTeacher(AuditModel):
+    """Presença de cada professor da turma na lição.
+
+    `AttendanceSheet.professor` continua indicando quem ministrou a lição;
+    aqui ficam as presenças, uma linha por professor, porque uma turma pode
+    ter mais de um professor na mesma lição.
+    """
+
+    attendance_sheet = models.ForeignKey(
+        AttendanceSheet,
+        on_delete=models.CASCADE,
+        related_name='teachers',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='attendance_presences',
+    )
+    presente = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ('attendance_sheet', 'user')
+        ordering = ['user__nome']
 
 
 class AttendanceRecord(AuditModel):

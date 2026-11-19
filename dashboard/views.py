@@ -6,7 +6,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from attendance.models import AttendanceRecord, AttendanceSheet
+from attendance.models import AttendanceRecord, AttendanceSheet, AttendanceTeacher
 from classrooms.models import ClassGroup
 from core.permissions import module_permission
 from core.scoping import get_teaching_class_ids, is_somente_professor
@@ -225,6 +225,67 @@ def actions(request):
     return Response(build_dashboard_actions(request.user, active_org))
 
 
+def _professor_presence_rows(sheets):
+    """Presenças de professores das fichas informadas, uma linha por professor.
+
+    A verdade é `AttendanceTeacher` (uma linha por professor da turma). Fichas
+    anteriores à tabela — ou criadas direto pelo ORM — caem no par legado
+    (`professor`, `professor_presente`) para não sumirem do ranking.
+    """
+    sheet_ids = list(sheets.values_list('id', flat=True))
+    if not sheet_ids:
+        return []
+
+    rows = []
+    sheets_com_registro = set()
+    for row in AttendanceTeacher.objects.filter(
+        attendance_sheet_id__in=sheet_ids,
+    ).values(
+        'attendance_sheet_id',
+        'attendance_sheet__lesson_id',
+        'attendance_sheet__class_group_id',
+        'attendance_sheet__class_group__nome',
+        'user_id',
+        'user__nome',
+        'presente',
+    ):
+        sheets_com_registro.add(row['attendance_sheet_id'])
+        rows.append(
+            {
+                'professor_id': row['user_id'],
+                'professor_nome': row['user__nome'],
+                'lesson_id': row['attendance_sheet__lesson_id'],
+                'class_group_id': row['attendance_sheet__class_group_id'],
+                'class_group_nome': row['attendance_sheet__class_group__nome'],
+                'presente': row['presente'],
+            }
+        )
+
+    legacy = sheets.filter(professor__isnull=False).exclude(
+        id__in=sheets_com_registro,
+    )
+    for row in legacy.values(
+        'professor_id',
+        'professor__nome',
+        'lesson_id',
+        'class_group_id',
+        'class_group__nome',
+        'professor_presente',
+    ):
+        rows.append(
+            {
+                'professor_id': row['professor_id'],
+                'professor_nome': row['professor__nome'],
+                'lesson_id': row['lesson_id'],
+                'class_group_id': row['class_group_id'],
+                'class_group_nome': row['class_group__nome'],
+                'presente': row['professor_presente'],
+            }
+        )
+
+    return rows
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, module_permission('dashboard', 'visualizar')])
 def professor_ranking(request):
@@ -250,7 +311,6 @@ def professor_ranking(request):
         lesson__organization_id__in=org_ids,
         lesson__trimestre=trimestre,
         lesson__ano=ano,
-        professor__isnull=False,
         finalized_at__isnull=False,
         class_group__ativa=True,
         class_group__is_active=True,
@@ -260,29 +320,24 @@ def professor_ranking(request):
     if class_id_param is not None:
         sheets = sheets.filter(class_group_id=class_id_param)
 
+    presence_rows = _professor_presence_rows(sheets)
+
     professor_rows = {}
     professor_lesson_presence = {}
-    for row in sheets.values(
-        'professor_id',
-        'professor__nome',
-        'lesson_id',
-        'class_group_id',
-        'class_group__nome',
-        'professor_presente',
-    ):
+    for row in presence_rows:
         professor_id = row['professor_id']
         professor = professor_rows.setdefault(
             professor_id,
             {
-                'nome': row['professor__nome'],
+                'nome': row['professor_nome'],
                 'turmas': {},
             },
         )
-        professor['turmas'][row['class_group_id']] = row['class_group__nome']
+        professor['turmas'][row['class_group_id']] = row['class_group_nome']
         pair = (professor_id, row['lesson_id'])
         professor_lesson_presence[pair] = (
             professor_lesson_presence.get(pair, False)
-            or row['professor_presente']
+            or row['presente']
         )
 
     payload = []

@@ -9,7 +9,7 @@ from classrooms.models import ClassTeacher
 from core.tenant import get_operational_organization
 from students.models import Student
 
-from .models import AttendanceRecord, AttendanceSheet
+from .models import AttendanceRecord, AttendanceSheet, AttendanceTeacher
 
 
 class AttendanceRecordSerializer(serializers.ModelSerializer):
@@ -20,8 +20,17 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
         fields = ['id', 'student', 'aluno_nome', 'presente']
 
 
+class AttendanceTeacherSerializer(serializers.ModelSerializer):
+    professor_nome = serializers.CharField(source='user.nome', read_only=True)
+
+    class Meta:
+        model = AttendanceTeacher
+        fields = ['id', 'user', 'professor_nome', 'presente']
+
+
 class AttendanceSheetSerializer(serializers.ModelSerializer):
     records = AttendanceRecordSerializer(many=True, read_only=True)
+    teachers = AttendanceTeacherSerializer(many=True, read_only=True)
     status = serializers.CharField(read_only=True)
 
     class Meta:
@@ -39,6 +48,7 @@ class AttendanceSheetSerializer(serializers.ModelSerializer):
             'finalized_at',
             'status',
             'records',
+            'teachers',
         ]
         read_only_fields = ['finalized_at']
 
@@ -104,6 +114,35 @@ class AttendanceBulkUpsertSerializer(serializers.Serializer):
         return records
 
 
+class AttendanceTeacherInputSerializer(serializers.Serializer):
+    user = serializers.IntegerField(min_value=1)
+    presente = serializers.BooleanField()
+
+
+class AttendanceTeacherBulkUpsertSerializer(serializers.Serializer):
+    """Salva a frequência de vários professores da turma de uma só vez."""
+
+    teachers = AttendanceTeacherInputSerializer(many=True, allow_empty=True)
+
+    def validate_teachers(self, teachers):
+        user_ids = [item['user'] for item in teachers]
+        if len(user_ids) != len(set(user_ids)):
+            raise serializers.ValidationError(
+                'Cada professor pode aparecer apenas uma vez na frequência.'
+            )
+
+        class_group = self.context.get('class_group')
+        lesson = self.context.get('lesson')
+        if class_group:
+            for user_id in user_ids:
+                validate_professor_for_class(
+                    user_id,
+                    class_group,
+                    lesson=lesson,
+                )
+        return teachers
+
+
 class AttendanceRegistrationSerializer(serializers.Serializer):
     STATUS_CHOICES = (
         AttendanceSheet.STATUS_RASCUNHO,
@@ -111,7 +150,10 @@ class AttendanceRegistrationSerializer(serializers.Serializer):
     )
 
     professor = serializers.IntegerField(required=False, allow_null=True, min_value=1)
-    professor_presente = serializers.BooleanField(required=False, default=False)
+    # Sem `default`: ausente significa "não mexer na frequência do professor".
+    # A chamada dos alunos não pode apagar o que foi marcado na tela de
+    # frequência dos professores.
+    professor_presente = serializers.BooleanField(required=False)
     visitantes = serializers.IntegerField(required=False, default=0, min_value=0)
     biblias = serializers.IntegerField(required=False, default=0, min_value=0)
     revistas = serializers.IntegerField(required=False, default=0, min_value=0)

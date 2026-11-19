@@ -6,7 +6,50 @@ from rest_framework.exceptions import ValidationError
 
 from finance.models import Offering
 
-from .models import AttendanceRecord, AttendanceSheet
+from .models import AttendanceRecord, AttendanceSheet, AttendanceTeacher
+
+
+@transaction.atomic
+def save_teacher_presences(*, sheet, teachers, user):
+    """Grava a presença de cada professor da turma na lição.
+
+    Upsert por professor: quem não vem no payload fica como está. Isso é o que
+    permite dois professores da mesma turma ficarem presentes ao mesmo tempo —
+    antes a ficha tinha um único `professor_presente` e cada gravação apagava
+    a anterior.
+    """
+    for item in teachers:
+        AttendanceTeacher.objects.update_or_create(
+            attendance_sheet=sheet,
+            user_id=item['user'],
+            defaults={
+                'presente': bool(item.get('presente', False)),
+                'updated_by': user,
+            },
+        )
+
+    sync_legacy_professor_presence(sheet)
+    return sheet
+
+
+def sync_legacy_professor_presence(sheet):
+    """Espelha em `professor_presente` a presença do professor que ministrou.
+
+    O campo antigo continua existindo para não quebrar leitores legados; a
+    verdade passa a ser a tabela `AttendanceTeacher`.
+    """
+    if not sheet.professor_id:
+        return
+
+    presence = AttendanceTeacher.objects.filter(
+        attendance_sheet=sheet,
+        user_id=sheet.professor_id,
+    ).values_list('presente', flat=True).first()
+    if presence is None or presence == sheet.professor_presente:
+        return
+
+    sheet.professor_presente = presence
+    sheet.save(update_fields=['professor_presente', 'updated_at'])
 
 
 def sync_offering_from_attendance_sheet(sheet):
@@ -77,7 +120,12 @@ def save_attendance_registration(*, lesson, class_group, data, user):
     )
 
     sheet.professor_id = data.get('professor')
-    sheet.professor_presente = data.get('professor_presente', False)
+    # A chamada dos alunos só mexe na frequência do professor se ela vier no
+    # payload. Omitir preserva o que foi marcado na tela de frequência dos
+    # professores.
+    informou_presenca_professor = 'professor_presente' in data
+    if informou_presenca_professor:
+        sheet.professor_presente = data['professor_presente']
     sheet.visitantes = data.get('visitantes', 0)
     sheet.biblias = data.get('biblias', 0)
     sheet.revistas = data.get('revistas', 0)
@@ -90,7 +138,6 @@ def save_attendance_registration(*, lesson, class_group, data, user):
     sheet.updated_by = user
     update_fields = [
         'professor',
-        'professor_presente',
         'visitantes',
         'biblias',
         'revistas',
@@ -99,10 +146,26 @@ def save_attendance_registration(*, lesson, class_group, data, user):
         'updated_by',
         'updated_at',
     ]
+    if informou_presenca_professor:
+        update_fields.append('professor_presente')
     if created and sheet.created_by_id is None:
         sheet.created_by = user
         update_fields.append('created_by')
     sheet.save(update_fields=update_fields)
+
+    if informou_presenca_professor and sheet.professor_id:
+        AttendanceTeacher.objects.update_or_create(
+            attendance_sheet=sheet,
+            user_id=sheet.professor_id,
+            defaults={
+                'presente': sheet.professor_presente,
+                'updated_by': user,
+            },
+        )
+    else:
+        # Trocar o professor que ministrou não pode deixar o campo legado
+        # apontando para a presença de outra pessoa.
+        sync_legacy_professor_presence(sheet)
 
     submitted_student_ids = {item['student'] for item in data['records']}
     for item in data['records']:
